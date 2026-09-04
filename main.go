@@ -97,16 +97,31 @@ func main() {
 	}()
 
 	fmt.Println("olcvpn:", url)
-	openBrowser(url)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	<-ctx.Done()
+	if browserMode() || !runWindow(url) {
+		// No WebView2 runtime (or --browser asked for it): fall back to the
+		// default browser and wait for a signal instead of a window close.
+		openBrowser(url)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		<-ctx.Done()
+	}
 
 	a.tun.Stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// browserMode reports whether the user asked for the browser UI instead of the
+// app window.
+func browserMode() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--browser" || arg == "-browser" {
+			return true
+		}
+	}
+	return false
 }
 
 func openBrowser(url string) {

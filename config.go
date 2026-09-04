@@ -45,7 +45,7 @@ func defaultConfig(path string) *Config {
 		SocksPort:   8808,
 		DNS:         "8.8.8.8:53",
 		UseTUN:      true,
-		DirectHosts: "telemost.yandex.ru,yandex.net,yandex.ru,wb.ru",
+		DirectHosts: "marinvpn.online,telemost.yandex.ru,yandex.net,yandex.ru",
 		path:        path,
 	}
 }
