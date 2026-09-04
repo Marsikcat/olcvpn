@@ -35,6 +35,12 @@ type Config struct {
 	DirectIPs   string   `json:"directIps"`
 	DirectHosts string   `json:"directHosts"`
 
+	// Оформление и поведение приложения.
+	Theme       string `json:"theme"`       // auto | dark | light
+	Autoconnect bool   `json:"autoconnect"` // подключаться при запуске
+	TrayClose   bool   `json:"trayClose"`   // «закрыть» сворачивает в трей
+	StartHidden bool   `json:"startHidden"` // стартовать сразу в трее
+
 	mu   sync.Mutex
 	path string
 }
@@ -45,7 +51,9 @@ func defaultConfig(path string) *Config {
 		SocksPort:   8808,
 		DNS:         "8.8.8.8:53",
 		UseTUN:      true,
-		DirectHosts: "marinvpn.online,telemost.yandex.ru,yandex.net,yandex.ru",
+		DirectHosts: "telemost.yandex.ru,yandex.net,yandex.ru",
+		Theme:       "auto",
+		TrayClose:   true,
 		path:        path,
 	}
 }
@@ -69,6 +77,9 @@ func loadConfig(dir string) *Config {
 	}
 	if c.DNS == "" {
 		c.DNS = "8.8.8.8:53"
+	}
+	if c.Theme == "" {
+		c.Theme = "auto"
 	}
 	return c
 }

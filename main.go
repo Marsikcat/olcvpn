@@ -98,13 +98,28 @@ func main() {
 
 	fmt.Println("olcvpn:", url)
 
-	if browserMode() || !runWindow(url) {
+	if a.cfg.Autoconnect {
+		go func() {
+			if err := a.connectSelected(); err != nil {
+				a.log.addf("автоподключение: %v", err)
+			}
+		}()
+	}
+
+	t := newTray(a)
+	t.start()
+	defer t.stop()
+
+	if browserMode() || !runWindow(url, a, t) {
 		// No WebView2 runtime (or --browser asked for it): fall back to the
 		// default browser and wait for a signal instead of a window close.
 		openBrowser(url)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-t.quit:
+		}
 	}
 
 	a.tun.Stop()
@@ -237,6 +252,10 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 		"cores":       a.cores(),
 		"core":        core.Name,
 		"admin":       isAdmin(),
+		"theme":       a.cfg.Theme,
+		"autoconnect": a.cfg.Autoconnect,
+		"trayClose":   a.cfg.TrayClose,
+		"autostart":   autostartEnabled(),
 		"tunActive":   a.tun.tunActive(),
 		"socksAddr":   fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
 		"rtt":         a.tun.rtt(),
@@ -308,6 +327,10 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		DirectIPs   *string `json:"directIps"`
 		DirectHosts *string `json:"directHosts"`
 		Core        *string `json:"core"`
+		Theme       *string `json:"theme"`
+		Autoconnect *bool   `json:"autoconnect"`
+		TrayClose   *bool   `json:"trayClose"`
+		Autostart   *bool   `json:"autostart"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, err)
@@ -334,8 +357,35 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.Core != nil {
 		a.cfg.CoreBinary = *body.Core
 	}
+	if body.Theme != nil {
+		a.cfg.Theme = *body.Theme
+	}
+	if body.Autoconnect != nil {
+		a.cfg.Autoconnect = *body.Autoconnect
+	}
+	if body.TrayClose != nil {
+		a.cfg.TrayClose = *body.TrayClose
+		closeHides.Store(*body.TrayClose)
+	}
+
+	note := ""
+	if body.Autostart != nil {
+		var err error
+		if *body.Autostart {
+			note, err = enableAutostart()
+		} else {
+			err = disableAutostart()
+			note = "Автозапуск выключен."
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		a.log.add(note)
+	}
+
 	_ = a.cfg.save()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "autostartNote": note})
 }
 
 func (a *app) handleSelect(w http.ResponseWriter, r *http.Request) {
@@ -352,21 +402,48 @@ func (a *app) handleSelect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConnect(w http.ResponseWriter, _ *http.Request) {
-	core, err := a.pickCore()
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	srv := a.cfg.selected()
-	if srv == nil {
-		writeErr(w, fmt.Errorf("сначала импортируйте подписку и выберите сервер"))
-		return
-	}
-	if err := a.tun.Start(a.cfg, srv, core.Path, core.Kind, a.cfg.UseTUN); err != nil {
+	if err := a.connectSelected(); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// connectSelected starts the currently selected server. Shared by the UI and
+// the tray menu.
+func (a *app) connectSelected() error {
+	core, err := a.pickCore()
+	if err != nil {
+		return err
+	}
+	srv := a.cfg.selected()
+	if srv == nil {
+		return fmt.Errorf("сначала импортируйте подписку и выберите сервер")
+	}
+	return a.tun.Start(a.cfg, srv, core.Path, core.Kind, a.cfg.UseTUN)
+}
+
+// stateChanged emits whenever the tunnel's phase or TUN state changes, so the
+// tray can follow along without polling from several places.
+func (a *app) stateChanged() <-chan struct{} {
+	out := make(chan struct{}, 1)
+	go func() {
+		var lastPhase phase
+		var lastTUN bool
+		for range time.Tick(time.Second) {
+			ph, _, _ := a.tun.status()
+			tun := a.tun.tunActive()
+			if ph == lastPhase && tun == lastTUN {
+				continue
+			}
+			lastPhase, lastTUN = ph, tun
+			select {
+			case out <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return out
 }
 
 func (a *app) handleDisconnect(w http.ResponseWriter, _ *http.Request) {

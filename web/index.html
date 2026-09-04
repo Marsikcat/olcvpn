@@ -11,11 +11,11 @@
     --accent:#4c8dff; --ok:#35c46a; --warn:#e0a13a; --err:#f2564c;
     --r:14px;
   }
-  @media (prefers-color-scheme: light){
-    :root{
-      --bg:#f2f4f8; --bg2:#e9edf3; --card:#ffffff; --line:#dfe4ec;
-      --text:#131922; --dim:#5f6b7c; --faint:#8b97a8;
-    }
+  /* Светлая тема. Класс ставит JS: при «как в системе» он читает
+     prefers-color-scheme, при явном выборе — просто ставит или снимает. */
+  :root.light{
+    --bg:#f2f4f8; --bg2:#e9edf3; --card:#ffffff; --line:#dfe4ec;
+    --text:#131922; --dim:#5f6b7c; --faint:#8b97a8;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -25,9 +25,8 @@
   .wrap{max-width:460px;margin:0 auto;padding:22px 18px 40px}
 
   .top{display:flex;align-items:center;gap:10px;margin-bottom:20px}
-  .logo{width:30px;height:30px;border-radius:9px;flex:none;
-        background:linear-gradient(140deg,var(--accent),#7b5cff);
-        display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px}
+  .logo{width:30px;height:30px;border-radius:9px;flex:none;object-fit:cover;
+        border:1px solid var(--line)}
   .title{font-weight:600;letter-spacing:.2px}
   .sub{margin-left:auto;color:var(--dim);font-size:13px}
 
@@ -71,6 +70,13 @@
   .seg button.act{background:var(--card);color:var(--text);
                   box-shadow:0 1px 3px rgba(0,0,0,.22)}
   .seg button:disabled{opacity:.45;cursor:default}
+  .seg3{grid-template-columns:1fr 1fr 1fr;margin-top:6px}
+  .seg3 button{font-size:13px;padding:8px 4px}
+
+  .check{display:flex;align-items:center;gap:10px;margin:0 0 2px;padding:8px 0;
+         color:var(--text);font-size:14px;cursor:pointer}
+  .check input{accent-color:var(--accent);width:16px;height:16px;flex:none;margin:0}
+  .check span{color:var(--text)}
 
   /* ── rows / cards ─────────────────────────────────── */
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
@@ -132,7 +138,7 @@
 <div class="wrap">
 
   <div class="top">
-    <div class="logo">o</div>
+    <img class="logo" src="logo.png" alt="">
     <div class="title">olcvpn</div>
     <div class="sub" id="subname"></div>
   </div>
@@ -202,7 +208,22 @@
     </button>
     <div class="panel" id="advPanel">
       <div class="pad">
-        <div class="grid2">
+        <label>Оформление</label>
+        <div class="seg seg3" id="themeSeg">
+          <button data-theme="auto">Как в системе</button>
+          <button data-theme="dark">Тёмная</button>
+          <button data-theme="light">Светлая</button>
+        </div>
+
+        <label class="mt">Поведение</label>
+        <label class="check"><input type="checkbox" id="autostart">
+          <span>Запускать при входе в Windows</span></label>
+        <label class="check"><input type="checkbox" id="autoconnect">
+          <span>Подключаться сразу при запуске</span></label>
+        <label class="check"><input type="checkbox" id="trayClose">
+          <span>Кнопка «закрыть» сворачивает в трей</span></label>
+
+        <div class="grid2 mt">
           <div><label>Порт прокси</label><input type="number" id="socksPort"></div>
           <div><label>DNS</label><input type="text" id="dns"></div>
         </div>
@@ -317,6 +338,13 @@ function render(){
       + 'Закройте и откройте <code>start.cmd</code>.';
   } else wc.hidden = true;
 
+  applyTheme(st.theme);
+  for(const b of $('themeSeg').children)
+    b.classList.toggle('act', b.dataset.theme === (st.theme || 'auto'));
+  $('autostart').checked   = !!st.autostart;
+  $('autoconnect').checked = !!st.autoconnect;
+  $('trayClose').checked   = !!st.trayClose;
+
   if(!dirty){
     $('socksPort').value = st.socksPort || '';
     $('dns').value = st.dns || '';
@@ -405,6 +433,45 @@ $('btnSave').onclick = async () => {
 };
 for(const id of ['socksPort','dns','directHosts','directIps','core'])
   $(id).addEventListener('input', () => { dirty = true; });
+
+/* ── оформление ──────────────────────────────────────────────
+   «Как в системе» решается здесь, а не в media-запросе: так светлая
+   палитра описана в CSS один раз, а выбор пользователя её просто
+   включает или выключает. */
+const sysLight = matchMedia('(prefers-color-scheme: light)');
+
+function applyTheme(mode){
+  const light = mode === 'light' || (mode !== 'dark' && sysLight.matches);
+  document.documentElement.classList.toggle('light', light);
+}
+sysLight.addEventListener('change', () => applyTheme(st.theme));
+
+for(const b of $('themeSeg').children){
+  b.onclick = async () => {
+    st.theme = b.dataset.theme;
+    applyTheme(st.theme);
+    for(const o of $('themeSeg').children) o.classList.toggle('act', o === b);
+    await api('/api/settings', {theme: st.theme});
+  };
+}
+
+$('autoconnect').onchange = async () => {
+  await api('/api/settings', {autoconnect: $('autoconnect').checked});
+};
+$('trayClose').onchange = async () => {
+  await api('/api/settings', {trayClose: $('trayClose').checked});
+};
+$('autostart').onchange = async () => {
+  const m = $('advMsg');
+  try{
+    const r = await api('/api/settings', {autostart: $('autostart').checked});
+    m.className = 'msg good';
+    m.textContent = r.autostartNote || '';
+  }catch(e){
+    m.className = 'msg bad'; m.textContent = e.message;
+    $('autostart').checked = !$('autostart').checked;
+  }
+};
 
 $('btnLog').onclick = () => { const l = $('log'); l.hidden = !l.hidden; };
 
