@@ -1,0 +1,11 @@
+# сборки и бинарники ядра
+*.exe
+bin/
+
+# локальное состояние — содержит ключи подписки
+olcvpn.json
+olcvpn.url
+core-config.yaml
+sing-box-config.json
+data/
+*.log

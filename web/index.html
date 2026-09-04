@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>olcvpn</title>
+<style>
+  :root{
+    --bg:#0e1116; --bg2:#141922; --card:#171d27; --line:#242c39;
+    --text:#e8eef6; --dim:#8b98ab; --faint:#5d6b7f;
+    --accent:#4c8dff; --ok:#35c46a; --warn:#e0a13a; --err:#f2564c;
+    --r:14px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f2f4f8; --bg2:#e9edf3; --card:#ffffff; --line:#dfe4ec;
+      --text:#131922; --dim:#5f6b7c; --faint:#8b97a8;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.5 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:460px;margin:0 auto;padding:22px 18px 40px}
+
+  .top{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+  .logo{width:30px;height:30px;border-radius:9px;flex:none;
+        background:linear-gradient(140deg,var(--accent),#7b5cff);
+        display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px}
+  .title{font-weight:600;letter-spacing:.2px}
+  .sub{margin-left:auto;color:var(--dim);font-size:13px}
+
+  /* ── hero ─────────────────────────────────────────── */
+  .hero{background:var(--card);border:1px solid var(--line);border-radius:20px;
+        padding:30px 22px 24px;text-align:center}
+  .power{position:relative;width:132px;height:132px;margin:0 auto 20px;
+         border-radius:50%;border:none;cursor:pointer;background:transparent;
+         display:grid;place-items:center;transition:transform .12s}
+  .power:active{transform:scale(.97)}
+  .power:disabled{cursor:default;opacity:.55}
+  .power .ring{position:absolute;inset:0;border-radius:50%;
+               border:2px solid var(--line);background:var(--bg2);
+               transition:border-color .3s,box-shadow .3s,background .3s}
+  .power .glyph{position:relative;width:44px;height:44px;color:var(--faint);transition:color .3s}
+  .power.on .ring{border-color:var(--ok);background:rgba(53,196,106,.10);
+                  box-shadow:0 0 0 6px rgba(53,196,106,.09),0 0 30px rgba(53,196,106,.22)}
+  .power.on .glyph{color:var(--ok)}
+  .power.busy .ring{border-color:var(--accent);background:rgba(76,141,255,.09);
+                    animation:breathe 1.6s ease-in-out infinite}
+  .power.busy .glyph{color:var(--accent)}
+  .power.bad .ring{border-color:var(--err);background:rgba(242,86,76,.09)}
+  .power.bad .glyph{color:var(--err)}
+  @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(76,141,255,.30)}
+                     50%{box-shadow:0 0 0 12px rgba(76,141,255,0)}}
+
+  .state{font-size:21px;font-weight:600;letter-spacing:-.2px}
+  .hint{color:var(--dim);font-size:13.5px;margin-top:5px;min-height:20px}
+
+  .facts{display:flex;justify-content:center;gap:8px;margin-top:16px;flex-wrap:wrap}
+  .fact{display:flex;align-items:center;gap:7px;background:var(--bg2);
+        border:1px solid var(--line);border-radius:999px;padding:5px 13px;font-size:13px}
+  .fact b{font-weight:600}
+  .fact .k{color:var(--dim)}
+
+  /* ── segmented mode ───────────────────────────────── */
+  .seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:20px;
+       background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:4px}
+  .seg button{border:none;background:transparent;color:var(--dim);
+              padding:9px 8px;border-radius:8px;font:500 13.5px inherit;cursor:pointer}
+  .seg button.act{background:var(--card);color:var(--text);
+                  box-shadow:0 1px 3px rgba(0,0,0,.22)}
+  .seg button:disabled{opacity:.45;cursor:default}
+
+  /* ── rows / cards ─────────────────────────────────── */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+        margin-top:14px;overflow:hidden}
+  .row{display:flex;align-items:center;gap:12px;width:100%;
+       padding:14px 16px;background:none;border:none;color:var(--text);
+       font:inherit;text-align:left;cursor:pointer}
+  .row+.row{border-top:1px solid var(--line)}
+  .row:hover{background:var(--bg2)}
+  .row .lbl{color:var(--dim);font-size:13px}
+  .row .val{margin-left:auto;color:var(--dim);font-size:13.5px;
+            display:flex;align-items:center;gap:8px}
+  .chev{width:16px;height:16px;color:var(--faint);flex:none}
+  .flag{width:26px;height:26px;border-radius:8px;flex:none;display:grid;place-items:center;
+        background:var(--bg2);border:1px solid var(--line);font-size:12px;color:var(--dim)}
+
+  .panel{display:none;border-top:1px solid var(--line);padding:6px 0}
+  .panel.open{display:block}
+  .srv{display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer}
+  .srv:hover{background:var(--bg2)}
+  .srv .nm{font-size:14px}
+  .srv .meta{color:var(--faint);font-size:12px}
+  .srv .tick{margin-left:auto;color:var(--ok);opacity:0;width:18px;height:18px}
+  .srv.sel .tick{opacity:1}
+
+  .pad{padding:14px 16px}
+  label{display:block;font-size:12.5px;color:var(--dim);margin:0 0 6px}
+  input[type=text],input[type=number],textarea,select{
+    width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--line);
+    border-radius:9px;padding:9px 11px;font:14px/1.4 inherit;outline:none}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:74px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .mt{margin-top:12px}
+
+  button.btn{background:var(--bg2);color:var(--text);border:1px solid var(--line);
+             border-radius:9px;padding:9px 16px;font:500 13.5px inherit;cursor:pointer}
+  button.btn:hover{border-color:var(--accent)}
+  button.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btns{display:flex;gap:9px;flex-wrap:wrap}
+
+  .note{color:var(--faint);font-size:12.5px;margin-top:10px;line-height:1.5}
+  .msg{font-size:13px;margin-top:10px;min-height:18px}
+  .msg.bad{color:var(--err)} .msg.good{color:var(--ok)}
+
+  .warn{display:flex;gap:10px;padding:12px 16px;background:rgba(224,161,58,.10);
+        border-top:1px solid var(--line);color:#e2b569;font-size:13px;line-height:1.5}
+  .warn code{background:var(--bg2);border:1px solid var(--line);border-radius:5px;
+             padding:1px 6px;font-family:ui-monospace,Consolas,monospace;color:var(--text)}
+
+  pre#log{margin:0;padding:12px 14px;height:280px;overflow:auto;background:var(--bg2);
+          font:11.5px/1.6 ui-monospace,Consolas,monospace;color:var(--dim);
+          white-space:pre-wrap;word-break:break-word}
+  #log .hi{color:var(--ok)} #log .bad{color:var(--err)} #log .wr{color:var(--warn)}
+  .foot{text-align:center;color:var(--faint);font-size:12px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div class="logo">o</div>
+    <div class="title">olcvpn</div>
+    <div class="sub" id="subname"></div>
+  </div>
+
+  <section class="hero">
+    <button class="power" id="power" title="Подключить">
+      <span class="ring"></span>
+      <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round">
+        <path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>
+      </svg>
+    </button>
+    <div class="state" id="state">Отключено</div>
+    <div class="hint" id="hint">Нажмите, чтобы подключиться</div>
+
+    <div class="facts" id="facts"></div>
+
+    <div class="seg">
+      <button id="modeAll" class="act">Весь трафик</button>
+      <button id="modeProxy">Только прокси</button>
+    </div>
+  </section>
+
+  <div class="card" id="warnCard" hidden><div class="warn" id="warn"></div></div>
+
+  <div class="card">
+    <button class="row" id="srvRow">
+      <span class="flag" id="srvFlag">VPN</span>
+      <span>
+        <span id="srvName">Сервер не выбран</span><br>
+        <span class="lbl" id="srvMeta">импортируйте подписку</span>
+      </span>
+      <span class="val">
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="m9 18 6-6-6-6"/></svg>
+      </span>
+    </button>
+    <div class="panel" id="srvPanel"></div>
+  </div>
+
+  <div class="card">
+    <button class="row" id="subRow">
+      <span class="lbl" style="color:var(--text);font-size:15px">Подписка</span>
+      <span class="val"><span id="subCount">—</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="m9 18 6-6-6-6"/></svg></span>
+    </button>
+    <div class="panel" id="subPanel">
+      <div class="pad">
+        <label>Ссылка подписки, olcrtc:// или JSON из QR-кода</label>
+        <textarea id="importText" placeholder="https://example.org:8080/sub/xxxx"></textarea>
+        <div class="btns mt">
+          <button class="btn pri" id="btnImport">Импортировать</button>
+          <button class="btn" id="btnQR">Из файла QR</button>
+        </div>
+        <div class="msg" id="importMsg"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="row" id="advRow">
+      <span class="lbl" style="color:var(--text);font-size:15px">Дополнительно</span>
+      <span class="val">
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="m9 18 6-6-6-6"/></svg></span>
+    </button>
+    <div class="panel" id="advPanel">
+      <div class="pad">
+        <div class="grid2">
+          <div><label>Порт прокси</label><input type="number" id="socksPort"></div>
+          <div><label>DNS</label><input type="text" id="dns"></div>
+        </div>
+        <div class="mt"><label>Ядро</label><select id="core"></select></div>
+        <div class="mt"><label>Домены мимо туннеля</label><input type="text" id="directHosts"></div>
+        <div class="mt"><label>IP мимо туннеля</label>
+          <input type="text" id="directIps" placeholder="203.0.113.0/24"></div>
+        <div class="btns mt">
+          <button class="btn pri" id="btnSave">Сохранить</button>
+          <button class="btn" id="btnLog">Журнал</button>
+        </div>
+        <div class="msg" id="advMsg"></div>
+        <div class="note" id="adminNote"></div>
+      </div>
+      <pre id="log" hidden></pre>
+    </div>
+  </div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let st = {}, dirty = false, where = null, busy = false;
+
+async function api(path, body){
+  const opt = body === undefined ? {} :
+    {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+
+/* Four user-facing states, collapsed from the core's finer phases. */
+function view(){
+  const p = st.phase;
+  if(p === 'stopped')  return {k:'off',  title:'Отключено',   hint:'Нажмите, чтобы подключиться'};
+  if(p === 'starting') return {k:'busy', title:'Подключение…', hint:'Ищем сервер в комнате'};
+  if(p === 'error')    return {k:'bad',  title:'Не удалось',   hint:st.detail || 'Попробуйте ещё раз'};
+  if(p === 'waiting'){
+    return st.peer
+      ? {k:'busy', title:'Восстановление…', hint:'Связь рвётся, идёт переподключение'}
+      : {k:'bad',  title:'Сервер не отвечает', hint:'Попробуйте другой сервер в списке'};
+  }
+  const whole = st.tunActive;
+  return {k:'on',
+          title: whole ? 'Защищено' : 'Прокси включён',
+          hint:  whole ? 'Весь трафик идёт через туннель'
+                       : 'Работает только для приложений с этим прокси'};
+}
+
+function render(){
+  const v = view();
+  $('state').textContent = v.title;
+  $('hint').textContent = v.hint;
+  const pw = $('power');
+  pw.className = 'power ' + (v.k === 'off' ? '' : v.k);
+  pw.disabled = busy || !(st.servers || []).length;
+  pw.title = v.k === 'off' ? 'Подключить' : 'Отключить';
+
+  $('subname').textContent = st.subName || '';
+
+  /* facts */
+  const f = [];
+  if(v.k === 'on' && st.rtt) f.push(['Пинг', st.rtt + ' мс']);
+  if(v.k === 'on' && where && where.ip){
+    const loc = [where.city, where.country].filter(Boolean).join(', ');
+    if(loc) f.push(['Выход', loc]);
+    f.push(['IP', where.ip]);
+  }
+  $('facts').innerHTML = f.map(([k,val]) =>
+    `<span class="fact"><span class="k">${k}</span><b>${val}</b></span>`).join('');
+
+  /* mode */
+  const whole = st.useTun;
+  $('modeAll').classList.toggle('act', whole);
+  $('modeProxy').classList.toggle('act', !whole);
+  $('modeAll').disabled = !st.admin;
+
+  /* server row */
+  const sel = (st.servers || []).find(s => s.id === st.selectedId) || (st.servers || [])[0];
+  $('srvName').textContent = sel ? sel.name : 'Сервер не выбран';
+  $('srvMeta').textContent = sel ? (sel.carrier + ' · ' + sel.transport) : 'импортируйте подписку';
+  $('subCount').textContent = (st.servers || []).length
+    ? (st.servers.length + ' серв.') : 'нет';
+
+  const panel = $('srvPanel');
+  panel.innerHTML = (st.servers || []).map(s => `
+    <div class="srv ${s.id === st.selectedId ? 'sel' : ''}" data-id="${s.id}">
+      <span class="flag">${(s.carrier || '?').slice(0,3).toUpperCase()}</span>
+      <span><span class="nm"></span><br><span class="meta"></span></span>
+      <svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M20 6 9 17l-5-5"/></svg>
+    </div>`).join('');
+  [...panel.querySelectorAll('.srv')].forEach((el,i) => {
+    el.querySelector('.nm').textContent = st.servers[i].name;
+    el.querySelector('.meta').textContent = 'комната ' + st.servers[i].roomId;
+    el.onclick = async () => { await api('/api/select',{id:el.dataset.id}); refresh(); };
+  });
+
+  /* warning */
+  const wc = $('warnCard');
+  if(v.k === 'on' && !st.tunActive){
+    wc.hidden = false;
+    $('warn').innerHTML = 'Система туннель не использует — включён только прокси '
+      + `<code>${st.socksAddr || '127.0.0.1:8808'}</code>. Сайты вроде 2ip покажут прежний IP. `
+      + 'Переключитесь на «Весь трафик».';
+  } else if(!st.admin){
+    wc.hidden = false;
+    $('warn').innerHTML = 'Запущено без прав администратора — режим «Весь трафик» недоступен. '
+      + 'Закройте и откройте <code>start.cmd</code>.';
+  } else wc.hidden = true;
+
+  if(!dirty){
+    $('socksPort').value = st.socksPort || '';
+    $('dns').value = st.dns || '';
+    $('directHosts').value = st.directHosts || '';
+    $('directIps').value = st.directIps || '';
+    const sc = $('core'); sc.innerHTML = '';
+    for(const c of st.cores || []){
+      const o = document.createElement('option');
+      o.value = c.name; o.textContent = c.name;
+      if(c.name === st.core) o.selected = true;
+      sc.appendChild(o);
+    }
+  }
+  $('adminNote').textContent = st.admin
+    ? 'Права администратора есть.'
+    : 'Прав администратора нет — TUN недоступен.';
+  $('foot').textContent = 'ядро ' + (st.core || '—');
+}
+
+async function refresh(){
+  try{ st = await api('/api/state'); render(); }catch(e){}
+}
+
+/* ── actions ─────────────────────────────────────── */
+$('power').onclick = async () => {
+  busy = true; render();
+  try{
+    if(st.phase === 'stopped' || st.phase === 'error'){
+      where = null;
+      await api('/api/connect', {});
+    } else {
+      await api('/api/disconnect', {});
+      where = null;
+    }
+  }catch(e){ alert(e.message); }
+  busy = false;
+  refresh();
+};
+
+async function setMode(on){
+  try{ await api('/api/tun', {on}); }
+  catch(e){ $('advMsg').className = 'msg bad'; $('advMsg').textContent = e.message; }
+  where = null;
+  refresh();
+}
+$('modeAll').onclick   = () => setMode(true);
+$('modeProxy').onclick = () => setMode(false);
+
+const toggle = (rowId, panelId) => {
+  $(rowId).onclick = () => $(panelId).classList.toggle('open');
+};
+toggle('srvRow','srvPanel'); toggle('subRow','subPanel'); toggle('advRow','advPanel');
+
+$('btnImport').onclick = async () => {
+  const m = $('importMsg');
+  try{
+    const r = await api('/api/import', {text: $('importText').value});
+    $('importText').value = '';
+    m.className = 'msg good'; m.textContent = 'Добавлено серверов: ' + r.count;
+    refresh();
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+};
+
+$('btnQR').onclick = async () => {
+  const p = prompt('Путь к файлу с QR-кодом:', 'F:\\olcrtc-subscription-qr.png');
+  if(!p) return;
+  const m = $('importMsg');
+  try{
+    const r = await api('/api/import-qr', {path:p});
+    m.className = 'msg good'; m.textContent = 'Добавлено серверов: ' + r.count;
+    refresh();
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+};
+
+$('btnSave').onclick = async () => {
+  await api('/api/settings', {
+    socksPort: parseInt($('socksPort').value,10) || 8808,
+    dns: $('dns').value.trim(),
+    directHosts: $('directHosts').value.trim(),
+    directIps: $('directIps').value.trim(),
+    core: $('core').value,
+  });
+  dirty = false;
+  $('advMsg').className = 'msg good'; $('advMsg').textContent = 'Сохранено';
+  refresh();
+};
+for(const id of ['socksPort','dns','directHosts','directIps','core'])
+  $(id).addEventListener('input', () => { dirty = true; });
+
+$('btnLog').onclick = () => { const l = $('log'); l.hidden = !l.hidden; };
+
+/* Ask where we exit once the link is healthy, then refresh it occasionally. */
+setInterval(async () => {
+  const live = st.phase === 'proxy' || st.phase === 'connected';
+  if(!live) { if(where){ where = null; render(); } return; }
+  try{
+    const r = await api('/api/where');
+    if(r.ip && (!where || where.ip !== r.ip)){ where = r; render(); }
+  }catch(e){}
+}, 12000);
+
+/* ── log stream ──────────────────────────────────── */
+const log = $('log');
+new EventSource('/api/logs').onmessage = ev => {
+  const near = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  const s = document.createElement('span');
+  const t = ev.data;
+  if(/latched|туннель работает|туннель установлен|SOCKS5|IP через/i.test(t)) s.className = 'hi';
+  else if(/error|ошибк|failed|не удалось/i.test(t)) s.className = 'bad';
+  else if(/timeout|не отвечает|переподключ|warn/i.test(t)) s.className = 'wr';
+  s.textContent = t + '\n';
+  log.appendChild(s);
+  while(log.childNodes.length > 900) log.removeChild(log.firstChild);
+  if(near) log.scrollTop = log.scrollHeight;
+};
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
