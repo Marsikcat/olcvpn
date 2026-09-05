@@ -29,6 +29,7 @@ type app struct {
 	log  *logBus
 	tun  *Tunnel
 	kind map[string]coreKind
+	tray *tray
 }
 
 func main() {
@@ -67,6 +68,8 @@ func main() {
 	mux.HandleFunc("/api/tun", a.handleTUN)
 	mux.HandleFunc("/api/where", a.handleWhere)
 	mux.HandleFunc("/api/testip", a.handleTestIP)
+	mux.HandleFunc("/api/update/check", a.handleUpdateCheck)
+	mux.HandleFunc("/api/update/install", a.handleUpdateInstall)
 	mux.HandleFunc("/api/logs", a.handleLogs)
 
 	// Prefer a stable port so the UI is always at the same address; fall back
@@ -107,6 +110,7 @@ func main() {
 	}
 
 	t := newTray(a)
+	a.tray = t
 	t.start()
 	defer t.stop()
 
@@ -252,6 +256,7 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 		"cores":       a.cores(),
 		"core":        core.Name,
 		"admin":       isAdmin(),
+		"version":     version,
 		"theme":       a.cfg.Theme,
 		"autoconnect": a.cfg.Autoconnect,
 		"trayClose":   a.cfg.TrayClose,
@@ -260,6 +265,43 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 		"socksAddr":   fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
 		"rtt":         a.tun.rtt(),
 	})
+}
+
+func (a *app) handleUpdateCheck(w http.ResponseWriter, _ *http.Request) {
+	info, err := checkUpdate()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// handleUpdateInstall answers immediately and does the work in the background:
+// the download takes long enough that the request would time out, and the
+// process exits at the end of it anyway. Progress goes to the log stream.
+func (a *app) handleUpdateInstall(w http.ResponseWriter, _ *http.Request) {
+	info, err := checkUpdate()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !info.Available {
+		writeErr(w, fmt.Errorf("уже установлена последняя версия"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "latest": info.Latest})
+
+	go func() {
+		if err := a.installUpdate(info); err != nil {
+			a.log.addf("обновление: %v", err)
+			return
+		}
+		// Файлы подменит скрипт, как только этот процесс исчезнет.
+		time.Sleep(500 * time.Millisecond)
+		if a.tray != nil {
+			a.tray.signal(a.tray.quit)
+		}
+	}()
 }
 
 func (a *app) handleImport(w http.ResponseWriter, r *http.Request) {

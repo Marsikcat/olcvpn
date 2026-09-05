@@ -61,10 +61,26 @@ func importAny(text string) (*importResult, error) {
 		}
 	}
 
+	// olcrtc://subscription?url=... — не сервер, а обёртка вокруг адреса
+	// подписки: панели раздают именно её, потому что по ней клиент потом
+	// обновляет список серверов.
+	if name, subURL, ok := subscriptionLink(text); ok {
+		res, err := fetchSubscription(subURL)
+		if err != nil {
+			return nil, err
+		}
+		if name != "" {
+			res.Name = name
+		}
+		return res, nil
+	}
+
 	if strings.Contains(text, "olcrtc://") {
 		servers := parseURIList(text)
 		if len(servers) == 0 {
-			return nil, fmt.Errorf("не удалось разобрать ни одной olcrtc:// ссылки")
+			return nil, fmt.Errorf(
+				"ссылка не похожа ни на сервер (olcrtc://провайдер@room/ID?key=...), " +
+					"ни на подписку (olcrtc://subscription?url=...)")
 		}
 		return &importResult{Name: "Импорт по ссылке", Servers: servers}, nil
 	}
@@ -105,6 +121,35 @@ func fetchSubscription(subURL string) (*importResult, error) {
 		}
 	}
 	return &importResult{Name: name, SubURL: subURL, Servers: servers}, nil
+}
+
+// subscriptionLink pulls the subscription address out of an
+// olcrtc://subscription?url=...&name=... link.
+//
+// The link also carries mirror_url / mirror_key — an encrypted copy of the
+// same list on a file host, used when the panel itself is unreachable. The
+// mirror's container format is not documented anywhere we can check, so it is
+// deliberately ignored rather than guessed at.
+func subscriptionLink(text string) (name, subURL string, ok bool) {
+	for _, field := range strings.Fields(text) {
+		if !strings.HasPrefix(field, "olcrtc://subscription") {
+			continue
+		}
+		u, err := url.Parse(field)
+		if err != nil {
+			continue
+		}
+		q := u.Query()
+		target := q.Get("url")
+		if target == "" {
+			continue
+		}
+		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+			continue
+		}
+		return q.Get("name"), target, true
+	}
+	return "", "", false
 }
 
 func parseURIList(text string) []Server {

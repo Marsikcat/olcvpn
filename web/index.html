@@ -78,6 +78,10 @@
   .check input{accent-color:var(--accent);width:16px;height:16px;flex:none;margin:0}
   .check span{color:var(--text)}
 
+  .upd{display:flex;align-items:center;gap:12px;margin-top:6px;flex-wrap:wrap}
+  .updver{color:var(--dim);font-size:13.5px;margin-right:auto}
+  .updver b{color:var(--text);font-weight:600}
+
   /* ── rows / cards ─────────────────────────────────── */
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
         margin-top:14px;overflow:hidden}
@@ -235,6 +239,16 @@
           <button class="btn pri" id="btnSave">Сохранить</button>
           <button class="btn" id="btnLog">Журнал</button>
         </div>
+
+        <label class="mt">Обновления</label>
+        <div class="upd">
+          <div class="updver">Версия <b id="ver">—</b></div>
+          <div class="btns">
+            <button class="btn" id="btnCheck">Проверить</button>
+            <button class="btn pri" id="btnUpdate" hidden>Обновить</button>
+          </div>
+        </div>
+        <div class="msg" id="updMsg"></div>
         <div class="msg" id="advMsg"></div>
         <div class="note" id="adminNote"></div>
       </div>
@@ -358,6 +372,7 @@ function render(){
       sc.appendChild(o);
     }
   }
+  $('ver').textContent = st.version || '—';
   $('adminNote').textContent = st.admin
     ? 'Права администратора есть.'
     : 'Прав администратора нет — TUN недоступен.';
@@ -474,6 +489,47 @@ $('autostart').onchange = async () => {
 };
 
 $('btnLog').onclick = () => { const l = $('log'); l.hidden = !l.hidden; };
+
+/* ── обновления ──────────────────────────────────────────── */
+let upd = null;
+
+async function checkUpdate(quiet){
+  const m = $('updMsg');
+  if(!quiet){ m.className = 'msg'; m.textContent = 'Проверяю…'; }
+  try{
+    upd = await api('/api/update/check');
+    if(upd.available){
+      $('btnUpdate').hidden = false;
+      m.className = 'msg good';
+      m.textContent = 'Доступна ' + upd.latest
+        + (upd.assetSize ? ' — ' + (upd.assetSize/1048576).toFixed(1) + ' МБ' : '');
+    }else{
+      $('btnUpdate').hidden = true;
+      if(!quiet){ m.className = 'msg'; m.textContent = 'Установлена последняя версия'; }
+    }
+  }catch(e){
+    if(!quiet){ m.className = 'msg bad'; m.textContent = e.message; }
+  }
+}
+
+$('btnCheck').onclick = () => checkUpdate(false);
+
+$('btnUpdate').onclick = async () => {
+  const m = $('updMsg');
+  $('btnUpdate').disabled = true;
+  m.className = 'msg';
+  m.textContent = 'Качаю обновление, приложение перезапустится само…';
+  try{
+    await api('/api/update/install', {});
+  }catch(e){
+    m.className = 'msg bad'; m.textContent = e.message;
+    $('btnUpdate').disabled = false;
+  }
+};
+
+/* Тихая проверка на старте: если что-то есть, кнопка «Обновить» появится
+   сама, а молчание ничего не занимает на экране. */
+checkUpdate(true);
 
 /* Ask where we exit once the link is healthy, then refresh it occasionally. */
 setInterval(async () => {
