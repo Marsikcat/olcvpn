@@ -224,6 +224,8 @@
           <span>Запускать при входе в Windows</span></label>
         <label class="check"><input type="checkbox" id="autoconnect">
           <span>Подключаться сразу при запуске</span></label>
+        <label class="check"><input type="checkbox" id="startHidden">
+          <span>Запускаться свёрнутым в трей, без окна</span></label>
         <label class="check"><input type="checkbox" id="trayClose">
           <span>Кнопка «закрыть» сворачивает в трей</span></label>
 
@@ -358,6 +360,7 @@ function render(){
   $('autostart').checked   = !!st.autostart;
   $('autoconnect').checked = !!st.autoconnect;
   $('trayClose').checked   = !!st.trayClose;
+  $('startHidden').checked = !!st.startHidden;
 
   if(!dirty){
     $('socksPort').value = st.socksPort || '';
@@ -373,6 +376,9 @@ function render(){
     }
   }
   $('ver').textContent = st.version || '—';
+  /* Кнопку показывает и фоновая проверка приложения: она могла пройти
+     позже, уже после того как окно свою проверку провалило. */
+  if(st.updateAvailable) $('btnUpdate').hidden = false;
   $('adminNote').textContent = st.admin
     ? 'Права администратора есть.'
     : 'Прав администратора нет — TUN недоступен.';
@@ -475,6 +481,9 @@ $('autoconnect').onchange = async () => {
 };
 $('trayClose').onchange = async () => {
   await api('/api/settings', {trayClose: $('trayClose').checked});
+};
+$('startHidden').onchange = async () => {
+  await api('/api/settings', {startHidden: $('startHidden').checked});
 };
 $('autostart').onchange = async () => {
   const m = $('advMsg');

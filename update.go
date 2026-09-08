@@ -131,6 +131,54 @@ func splitVersion(v string) [3]int {
 	return out
 }
 
+// watchUpdates checks once at startup and, if that failed because nothing was
+// reachable yet, again as soon as the tunnel first carries traffic. A machine
+// that boots with the app is usually offline for the first seconds, and on a
+// censored network the tunnel may be the only way out at all — so the moment
+// it comes up is exactly when the check has a chance to succeed.
+func (a *app) watchUpdates() {
+	if a.tryUpdateCheck() {
+		return
+	}
+	a.log.add("обновления: сети нет, проверю после подключения")
+
+	for range a.stateChanged() {
+		if _, _, peer := a.tun.status(); !peer {
+			continue
+		}
+		if a.tryUpdateCheck() {
+			return
+		}
+	}
+}
+
+// tryUpdateCheck reports whether GitHub answered at all; an available update is
+// remembered for the UI and mentioned in the log.
+func (a *app) tryUpdateCheck() bool {
+	info, err := checkUpdate()
+	if err != nil {
+		return false
+	}
+
+	a.updMu.Lock()
+	a.upd = info
+	a.updMu.Unlock()
+
+	if info.Available {
+		a.log.addf("доступно обновление %s (установлена %s)", info.Latest, info.Current)
+	} else {
+		a.log.addf("обновлений нет, установлена %s", info.Current)
+	}
+	return true
+}
+
+// lastUpdateCheck returns what the background check found, if anything.
+func (a *app) lastUpdateCheck() updateInfo {
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+	return a.upd
+}
+
 // installUpdate downloads the release archive, unpacks it beside the app and
 // hands the swap to a small script.
 //

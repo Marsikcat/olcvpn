@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -73,6 +74,7 @@ type Tunnel struct {
 	server    *Server
 	peerSeen  bool
 	zeroTicks int
+	degraded  atomic.Bool // TUN не поднялся, работаем как прокси
 	lastRTT   int
 	stopping  bool
 }
@@ -188,6 +190,7 @@ func (t *Tunnel) Start(cfg *Config, srv *Server, bin string, kind coreKind, with
 	t.server = srv
 	t.peerSeen = false
 	t.zeroTicks = 0
+	t.degraded.Store(false)
 	t.lastRTT = 0
 	t.stopping = false
 	t.mu.Unlock()
@@ -219,8 +222,13 @@ func (t *Tunnel) pump(r io.Reader, cfg *Config, withTUN bool) {
 			t.setPhase(phaseProxy, "SOCKS5 поднят")
 			if withTUN {
 				if err := t.startSingBox(cfg); err != nil {
+					// TUN не поднялся, но SOCKS уже слушает и туннель живой:
+					// это деградация до режима прокси, а не отказ. Сообщение
+					// «Не удалось» здесь врало бы — работать через прокси
+					// можно прямо сейчас.
 					t.log.addf("sing-box: %v", err)
-					t.setPhase(phaseError, "sing-box: "+err.Error())
+					t.degraded.Store(true)
+					t.setPhase(phaseProxy, "только прокси: "+err.Error())
 				}
 			}
 		case strings.Contains(line, "peer latched"):
@@ -241,22 +249,27 @@ func (t *Tunnel) pump(r io.Reader, cfg *Config, withTUN bool) {
 				t.peerSeen = true
 				t.mu.Unlock()
 			}
-			if withTUN && t.tunActive() {
-				t.setPhase(phaseConnected, "туннель работает")
-			} else {
-				t.setPhase(phaseProxy, "туннель работает")
-			}
+			t.setPhase(t.healthyPhase(withTUN))
 		case strings.Contains(line, "session ") && strings.Contains(line, "opened"):
 			// The YAML-era core prints no metrics; an opened session is its
 			// equivalent proof that the far side answered.
 			t.markPeer()
-			if withTUN {
-				t.setPhase(phaseConnected, "туннель работает")
-			} else {
-				t.setPhase(phaseProxy, "туннель работает")
-			}
+			t.setPhase(t.healthyPhase(withTUN))
 		}
 	}
+}
+
+// healthyPhase describes a link that is up. It exists so the one case that is
+// easy to misreport — TUN was asked for but did not start — says "только
+// прокси" instead of claiming the whole system is routed.
+func (t *Tunnel) healthyPhase(withTUN bool) (phase, string) {
+	if withTUN && t.tunActive() {
+		return phaseConnected, "туннель работает"
+	}
+	if t.degraded.Load() {
+		return phaseProxy, "только прокси: TUN не запустился"
+	}
+	return phaseProxy, "туннель работает"
 }
 
 // stall reports a handshake that did not complete. Once a session has already

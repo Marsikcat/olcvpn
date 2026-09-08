@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -65,7 +66,14 @@ func loadConfig(dir string) *Config {
 	if err != nil {
 		return c
 	}
+	// Блокнот и PowerShell сохраняют UTF-8 с BOM, а json.Unmarshal на нём
+	// спотыкается: без этого правки файла руками молча сбрасывали настройки.
+	b = bytes.TrimPrefix(bytes.TrimSpace(b), []byte("\xef\xbb\xbf"))
+
 	if err := json.Unmarshal(b, c); err != nil {
+		// Не терять чужой файл: следующее сохранение перезаписало бы его
+		// дефолтами, и серверы подписки исчезли бы без следа.
+		_ = os.Rename(path, path+".bad")
 		return defaultConfig(path)
 	}
 	c.path = path

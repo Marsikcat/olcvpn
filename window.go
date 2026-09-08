@@ -90,8 +90,11 @@ func runWindow(url string, a *app, t *tray) (ok bool) {
 		}
 	}()
 
-	if a.cfg.StartHidden {
-		w.Dispatch(func() { hideWindow(hwnd) })
+	// Прятать надо прямо здесь, а не через Dispatch: мы уже на потоке окна,
+	// а отложенный вызов сработал бы только после старта цикла сообщений —
+	// то есть окно успело бы моргнуть на экране.
+	if a.cfg.StartHidden || trayMode() {
+		hideWindow(hwnd)
 	}
 
 	w.Navigate(url)

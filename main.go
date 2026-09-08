@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -30,6 +31,9 @@ type app struct {
 	tun  *Tunnel
 	kind map[string]coreKind
 	tray *tray
+
+	updMu sync.Mutex
+	upd   updateInfo
 }
 
 func main() {
@@ -108,6 +112,8 @@ func main() {
 			}
 		}()
 	}
+
+	go a.watchUpdates()
 
 	t := newTray(a)
 	a.tray = t
@@ -240,30 +246,33 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 	ph, detail, peer := a.tun.status()
 	core, _ := a.pickCore()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"phase":       string(ph),
-		"detail":      detail,
-		"peer":        peer,
-		"servers":     a.cfg.Servers,
-		"selectedId":  a.cfg.SelectedID,
-		"subName":     a.cfg.SubName,
-		"subUrl":      a.cfg.SubURL,
-		"socksHost":   a.cfg.SocksHost,
-		"socksPort":   a.cfg.SocksPort,
-		"dns":         a.cfg.DNS,
-		"useTun":      a.cfg.UseTUN,
-		"directIps":   a.cfg.DirectIPs,
-		"directHosts": a.cfg.DirectHosts,
-		"cores":       a.cores(),
-		"core":        core.Name,
-		"admin":       isAdmin(),
-		"version":     version,
-		"theme":       a.cfg.Theme,
-		"autoconnect": a.cfg.Autoconnect,
-		"trayClose":   a.cfg.TrayClose,
-		"autostart":   autostartEnabled(),
-		"tunActive":   a.tun.tunActive(),
-		"socksAddr":   fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
-		"rtt":         a.tun.rtt(),
+		"phase":           string(ph),
+		"detail":          detail,
+		"peer":            peer,
+		"servers":         a.cfg.Servers,
+		"selectedId":      a.cfg.SelectedID,
+		"subName":         a.cfg.SubName,
+		"subUrl":          a.cfg.SubURL,
+		"socksHost":       a.cfg.SocksHost,
+		"socksPort":       a.cfg.SocksPort,
+		"dns":             a.cfg.DNS,
+		"useTun":          a.cfg.UseTUN,
+		"directIps":       a.cfg.DirectIPs,
+		"directHosts":     a.cfg.DirectHosts,
+		"cores":           a.cores(),
+		"core":            core.Name,
+		"admin":           isAdmin(),
+		"version":         version,
+		"theme":           a.cfg.Theme,
+		"autoconnect":     a.cfg.Autoconnect,
+		"trayClose":       a.cfg.TrayClose,
+		"startHidden":     a.cfg.StartHidden,
+		"autostart":       autostartEnabled(),
+		"updateLatest":    a.lastUpdateCheck().Latest,
+		"updateAvailable": a.lastUpdateCheck().Available,
+		"tunActive":       a.tun.tunActive(),
+		"socksAddr":       fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
+		"rtt":             a.tun.rtt(),
 	})
 }
 
@@ -372,6 +381,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		Theme       *string `json:"theme"`
 		Autoconnect *bool   `json:"autoconnect"`
 		TrayClose   *bool   `json:"trayClose"`
+		StartHidden *bool   `json:"startHidden"`
 		Autostart   *bool   `json:"autostart"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -408,6 +418,9 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.TrayClose != nil {
 		a.cfg.TrayClose = *body.TrayClose
 		closeHides.Store(*body.TrayClose)
+	}
+	if body.StartHidden != nil {
+		a.cfg.StartHidden = *body.StartHidden
 	}
 
 	note := ""
@@ -572,4 +585,17 @@ func (a *app) handleLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// trayMode reports whether the app was asked to start straight into the tray
+// for this launch only, without touching the saved setting. The autostart
+// entry can use it to come up quietly while a manual launch still shows the
+// window.
+func trayMode() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--tray" || arg == "-tray" {
+			return true
+		}
+	}
+	return false
 }
