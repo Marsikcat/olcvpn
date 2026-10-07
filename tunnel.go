@@ -494,12 +494,22 @@ func flagArgs(cfg *Config, s *Server, dataDir string) []string {
 		if s.VP8FPS > 0 {
 			args = append(args, "-vp8-fps", strconv.Itoa(s.VP8FPS))
 		}
-		if s.VP8Batch > 0 {
-			args = append(args, "-vp8-batch", strconv.Itoa(s.VP8Batch))
-		}
+		args = append(args, "-vp8-batch", strconv.Itoa(clientVP8Batch))
 	}
 	return args
 }
+
+// clientVP8Batch is how many KCP packets the client packs into one VP8 frame
+// when sending. The subscription's vp8_batch describes the server's setting
+// and is deliberately not used for our own uplink.
+//
+// Telemost now drops roughly 10–20% of RTP packets. A batched frame spans
+// dozens of RTP packets and survives only if every one arrives, so with 64 per
+// frame nearly every data frame was lost and KCP kept resending whole batches:
+// measured 15–18 KB/s uplink against 37–42 KB/s unbatched. Batching is decided
+// by the sender alone — receivers accept both forms — so this is safe against
+// any server.
+const clientVP8Batch = 1
 
 func yamlConfig(cfg *Config, s *Server) string {
 	var b strings.Builder
@@ -513,17 +523,14 @@ func yamlConfig(cfg *Config, s *Server) string {
 	fmt.Fprintf(&b, "net:\n  transport: %s\n  dns: %q\n\n", s.Transport, serverDNS(cfg, s))
 	fmt.Fprintf(&b, "liveness:\n  interval: 10s\n  timeout: 5s\n  failures: 3\n\n")
 	fmt.Fprintf(&b, "socks:\n  host: %q\n  port: %d\n\n", cfg.SocksHost, cfg.SocksPort)
-	// Не заданные панелью fps/batch не пишем вовсе: пусть ядро возьмёт свои
-	// умолчания, а не наши догадки о них.
-	if s.Transport == "vp8channel" && (s.VP8FPS > 0 || s.VP8Batch > 0) {
+	// fps, не заданный панелью, не пишем: пусть ядро возьмёт своё умолчание.
+	// batch_size пишем всегда — см. clientVP8Batch.
+	if s.Transport == "vp8channel" {
 		fmt.Fprintf(&b, "vp8:\n")
 		if s.VP8FPS > 0 {
 			fmt.Fprintf(&b, "  fps: %d\n", s.VP8FPS)
 		}
-		if s.VP8Batch > 0 {
-			fmt.Fprintf(&b, "  batch_size: %d\n", s.VP8Batch)
-		}
-		fmt.Fprintf(&b, "\n")
+		fmt.Fprintf(&b, "  batch_size: %d\n\n", clientVP8Batch)
 	}
 	fmt.Fprintf(&b, "data: data\ndebug: true\n")
 	return b.String()
