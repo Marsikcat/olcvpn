@@ -1,0 +1,68 @@
+diff --git a/internal/transport/vp8channel/transport.go b/internal/transport/vp8channel/transport.go
+index e79df09..2cc8a27 100644
+--- a/internal/transport/vp8channel/transport.go
++++ b/internal/transport/vp8channel/transport.go
+@@ -756,6 +756,18 @@ func (p *streamTransport) drainTrack(track *webrtc.TrackRemote) {
+ 
+ const reorderWindow = 256
+ 
++// reorderMaxHold bounds how many later packets may queue up behind a missing
++// sequence number before the gap is given up on.
++//
++// The SFU no longer forwards a gap-free sequence: Telemost now leaves holes in
++// the numbering it rewrites for each subscriber, and those packets never
++// arrive. Waiting for the whole reorderWindow there meant ~256 packets of
++// stall per hole — about 25 s at the 10 pps keepalive rate — which outlasts
++// the handshake timeout and the liveness window, so no session could ever
++// form. Genuine reordering on this path spans a packet or two, and a dropped
++// frame is recovered by KCP retransmission anyway, so a short hold is enough.
++const reorderMaxHold = 4
++
+ func seqLess(a, b uint16) bool {
+ 	return (a-b)&0x8000 != 0
+ }
+@@ -781,7 +793,7 @@ func (b *reorderBuffer) push(pkt *rtp.Packet) []*rtp.Packet {
+ 	cp := &rtp.Packet{Header: pkt.Header}
+ 	cp.Payload = append([]byte(nil), pkt.Payload...)
+ 	b.pkts[pkt.SequenceNumber] = cp
+-	if len(b.pkts) > reorderWindow {
++	if len(b.pkts) > reorderMaxHold {
+ 		b.skipToOldest()
+ 	}
+ 	return b.drain()
+diff --git a/internal/transport/vp8channel/transport_unit_test.go b/internal/transport/vp8channel/transport_unit_test.go
+index c631b96..a88f665 100644
+--- a/internal/transport/vp8channel/transport_unit_test.go
++++ b/internal/transport/vp8channel/transport_unit_test.go
+@@ -329,6 +329,31 @@ func TestReorderBufferRestoresSequenceOrder(t *testing.T) {
+ 	}
+ }
+ 
++// A packet the SFU never forwards must not stall the stream: once
++// reorderMaxHold later packets are queued behind the hole, delivery resumes.
++func TestReorderBufferSkipsPermanentGap(t *testing.T) {
++	b := newReorderBuffer()
++	b.push(&rtp.Packet{Header: rtp.Header{SequenceNumber: 10}, Payload: []byte("a")})
++
++	// 11 is lost for good; 12.. keep arriving.
++	var delivered []uint16
++	for seq := uint16(12); seq < 12+reorderMaxHold+1; seq++ {
++		for _, p := range b.push(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq}, Payload: []byte("x")}) {
++			delivered = append(delivered, p.SequenceNumber)
++		}
++	}
++	if len(delivered) != reorderMaxHold+1 || delivered[0] != 12 {
++		t.Fatalf("delivered = %v, want 12..%d after skipping the hole", delivered, 12+reorderMaxHold)
++	}
++
++	// The stream keeps flowing in order afterwards.
++	next := 12 + reorderMaxHold + 1
++	got := b.push(&rtp.Packet{Header: rtp.Header{SequenceNumber: uint16(next)}, Payload: []byte("y")})
++	if len(got) != 1 || got[0].SequenceNumber != uint16(next) {
++		t.Fatalf("post-gap push delivered %+v, want %d", got, next)
++	}
++}
++
+ func TestKCPConnCRCVerifiesAndStripsPacket(t *testing.T) {
+ 	out := make(chan []byte, 1)
+ 	hdr := buildEpochHeader(bindingToken("client"), 0x01020304)

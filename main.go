@@ -381,6 +381,12 @@ func (a *app) applyImport(res *importResult) {
 // handleDeleteSubscription forgets the subscription and everything derived
 // from it. The tunnel goes down first: it is running on one of these servers.
 func (a *app) handleDeleteSubscription(w http.ResponseWriter, _ *http.Request) {
+	// Повторный клик, пока окно не успело обновиться, не должен писать в
+	// журнал «подписка удалена» на пустом месте.
+	if len(a.cfg.Servers) == 0 && a.cfg.SubURL == "" {
+		writeErr(w, fmt.Errorf("подписка не добавлена"))
+		return
+	}
 	name := a.cfg.SubName
 	if a.tun.running() {
 		a.tun.Stop()
