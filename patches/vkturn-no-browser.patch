@@ -1,0 +1,24 @@
+diff --git a/client/manual_captcha.go b/client/manual_captcha.go
+index 916043b..d4cfbc9 100755
+--- a/client/manual_captcha.go
++++ b/client/manual_captcha.go
+@@ -14,6 +14,7 @@ import (
+ 	"net/http"
+ 	"net/http/httputil"
+ 	neturl "net/url"
++	"os"
+ 	"os/exec"
+ 	"runtime"
+ 	"strings"
+@@ -589,6 +590,11 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
+ }
+ 
+ func openBrowser(url string) {
++	// A host app that shows the captcha in its own window (olcvpn) sets this,
++	// so the user is not sent to a second, external browser.
++	if os.Getenv("VKTURN_NO_BROWSER") == "1" {
++		return
++	}
+ 	for _, cmd := range browserOpenCommands(runtime.GOOS, url) {
+ 		if err := exec.Command(cmd.name, cmd.args...).Start(); err == nil {
+ 			return

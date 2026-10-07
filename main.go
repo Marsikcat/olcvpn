@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -34,6 +35,11 @@ type app struct {
 
 	updMu sync.Mutex
 	upd   updateInfo
+
+	// Капча VK: куда переключить окно (пусто — обратно в приложение) и есть
+	// ли вообще окно, а не вкладка браузера.
+	nav      chan string
+	inWindow atomic.Bool
 }
 
 func main() {
@@ -53,7 +59,9 @@ func main() {
 		log:  bus,
 		tun:  newTunnel(dir, bus),
 		kind: map[string]coreKind{},
+		nav:  make(chan string, 4),
 	}
+	a.tun.onCaptcha = a.onCaptcha
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -68,6 +76,8 @@ func main() {
 	mux.HandleFunc("/api/settings", a.handleSettings)
 	mux.HandleFunc("/api/subscription/delete", a.handleDeleteSubscription)
 	mux.HandleFunc("/api/subscription/refresh", a.handleRefreshSubscription)
+	mux.HandleFunc("/api/vkturn/add", a.handleVKTurnAdd)
+	mux.HandleFunc("/api/server/delete", a.handleServerDelete)
 	mux.HandleFunc("/api/select", a.handleSelect)
 	mux.HandleFunc("/api/connect", a.handleConnect)
 	mux.HandleFunc("/api/disconnect", a.handleDisconnect)
@@ -98,7 +108,7 @@ func main() {
 		a.log.addf("найдено ядро: %s (%s)", c.Name, c.Kind)
 	}
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: localOnly(ln.Addr().String(), mux), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Println(err)
@@ -252,7 +262,8 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 		"phase":           string(ph),
 		"detail":          detail,
 		"peer":            peer,
-		"servers":         a.cfg.Servers,
+		"servers":         a.publicServers(),
+		"captchaUrl":      a.tun.pendingCaptcha(),
 		"selectedId":      a.cfg.SelectedID,
 		"subName":         a.cfg.SubName,
 		"subUrl":          a.cfg.SubURL,
@@ -361,7 +372,8 @@ func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
 // Everything about the old one goes: keeping its address while showing the new
 // servers would make a later refresh silently pull the old list back.
 func (a *app) applyImport(res *importResult) {
-	a.cfg.Servers = res.Servers
+	// Серверы VK TURN добавлены руками и к подписке отношения не имеют.
+	a.cfg.Servers = append(append([]Server{}, res.Servers...), a.cfg.manualServers()...)
 	a.cfg.SubURL = res.SubURL
 	a.cfg.SubName = res.Name
 	a.cfg.SubUpdated = time.Time{}
@@ -383,17 +395,19 @@ func (a *app) applyImport(res *importResult) {
 func (a *app) handleDeleteSubscription(w http.ResponseWriter, _ *http.Request) {
 	// Повторный клик, пока окно не успело обновиться, не должен писать в
 	// журнал «подписка удалена» на пустом месте.
-	if len(a.cfg.Servers) == 0 && a.cfg.SubURL == "" {
+	if len(a.cfg.subscriptionServers()) == 0 && a.cfg.SubURL == "" {
 		writeErr(w, fmt.Errorf("подписка не добавлена"))
 		return
 	}
 	name := a.cfg.SubName
-	if a.tun.running() {
+	if a.tun.running() && !a.tun.onVKTurn() {
 		a.tun.Stop()
 	}
 
-	a.cfg.Servers = nil
-	a.cfg.SelectedID = ""
+	a.cfg.Servers = a.cfg.manualServers()
+	if !a.cfg.hasServer(a.cfg.SelectedID) {
+		a.cfg.SelectedID = ""
+	}
 	a.cfg.SubURL = ""
 	a.cfg.SubName = ""
 	a.cfg.SubUpdated = time.Time{}
@@ -511,13 +525,16 @@ func (a *app) handleConnect(w http.ResponseWriter, _ *http.Request) {
 // connectSelected starts the currently selected server. Shared by the UI and
 // the tray menu.
 func (a *app) connectSelected() error {
+	srv := a.cfg.selected()
+	if srv == nil {
+		return fmt.Errorf("сначала импортируйте подписку или добавьте VK TURN и выберите сервер")
+	}
+	if srv.isVKTurn() {
+		return a.tun.StartVKTurn(a.cfg, srv, a.cfg.UseTUN)
+	}
 	core, err := a.pickCore()
 	if err != nil {
 		return err
-	}
-	srv := a.cfg.selected()
-	if srv == nil {
-		return fmt.Errorf("сначала импортируйте подписку и выберите сервер")
 	}
 	return a.tun.Start(a.cfg, srv, core.Path, core.Kind, a.cfg.UseTUN)
 }

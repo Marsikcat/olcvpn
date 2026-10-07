@@ -42,7 +42,7 @@ func (d refreshDiff) String() string {
 // key or client ID was rotated on the panel counts as changed rather than as
 // one removed and one added — and stays selected.
 func (a *app) refreshSubscription() (refreshDiff, error) {
-	if a.cfg.SubURL == "" && len(a.cfg.Servers) == 0 {
+	if a.cfg.SubURL == "" && len(a.cfg.subscriptionServers()) == 0 {
 		return refreshDiff{}, fmt.Errorf("подписка не добавлена")
 	}
 	if a.cfg.SubURL == "" {
@@ -55,8 +55,9 @@ func (a *app) refreshSubscription() (refreshDiff, error) {
 		return refreshDiff{}, err
 	}
 
-	old := make(map[string]Server, len(a.cfg.Servers))
-	for _, s := range a.cfg.Servers {
+	subs := a.cfg.subscriptionServers()
+	old := make(map[string]Server, len(subs))
+	for _, s := range subs {
 		old[s.ID] = s
 	}
 	running := ""

@@ -4,8 +4,13 @@
 туннеля, который прячет трафик внутри видеопотока конференц-сервиса
 (Telemost, Jazz, wbstream, Jitsi).
 
+Второй способ — **VK TURN**: WireGuard через TURN-серверы звонков VK. Он
+в несколько раз быстрее, а пользователю нужна только ссылка на звонок; если
+VK попросит капчу, она открывается прямо в окне приложения.
+
 Один исполняемый файл: интерфейс встроен и открывается в собственном окне
-приложения. Клиент управляет ядром `olcrtc` и, для системного VPN, `sing-box`.
+приложения. Клиент управляет ядром `olcrtc`, клиентом VK TURN и, для
+системного VPN, `sing-box`.
 
 <!-- скриншот: docs/screenshot.png -->
 
@@ -13,6 +18,8 @@
 
 * импорт подписки — ссылка, `olcrtc://` URI или PNG с QR-кодом (декодер внутри);
 * список серверов подписки, переключение одним кликом;
+* серверы VK TURN: ссылка на звонок, адрес сервера и конфиг WireGuard —
+  и всё; капча VK проходится в окне приложения;
 * два режима: **весь трафик** через TUN или **только прокси** (SOCKS5);
   режим переключается на лету, без переподключения;
 * понятный статус вместо логов: «Защищено», «Восстановление», «Сервер не
@@ -99,7 +106,8 @@ GitHub. Если есть свежее, появляется кнопка «Об
 
     olcvpn.exe
     bin/olcrtc.exe       ядро olcRTC (любая линейка, тип определится сам)
-    bin/sing-box.exe     sing-box 1.12+ — только для режима «весь трафик»
+    bin/sing-box.exe     sing-box 1.12+ — режим «весь трафик» и VK TURN
+    bin/vkturn-client.exe  клиент vk-turn-proxy — только для VK TURN
 
 Клиент ищет `olcrtc*.exe` в `bin/` и рядом с собой, так что можно держать
 несколько сборок ядра и переключаться между ними в разделе «Дополнительно».
@@ -155,6 +163,125 @@ KCP в один видеокадр — до 60 КБ, то есть в десят
 | загрузка с сервера | ~5 КБ/с | 17–22 КБ/с |
 | выгрузка на сервер | 15–18 КБ/с | 21–42 КБ/с |
 
+## VK TURN
+
+TURN-серверы звонков VK стоят в российских белых списках: пока работают
+звонки VK, до них можно достучаться. [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy)
+получает по ссылке на звонок временный доступ к TURN, оборачивает WireGuard в
+DTLS и гонит его через TURN VK на ваш сервер. olcvpn запускает этот клиент
+сам, а поверх него `sing-box` поднимает WireGuard и отдаёт SOCKS5/HTTP или TUN:
+
+    sing-box (WireGuard) → 127.0.0.1:9000 → vkturn-client → TURN VK → сервер:56000 → WireGuard
+
+### Подключение
+
+В разделе «VK TURN» нужно заполнить три поля:
+
+* **приглашение в звонок VK** — `https://vk.com/call/join/…` (подходит и
+  `vk.ru`). Создайте звонок в VK и скопируйте ссылку-приглашение. Звонок не
+  завершайте «для всех»: пока он не завершён, ссылка действует;
+* **сервер vk-turn-proxy** — `IP:порт`, на котором слушает серверная часть;
+* **конфиг WireGuard** — обычный клиентский `.conf` от этого сервера; можно
+  вставить текстом или выбрать файлом. `Endpoint` в нём игнорируется: туннель
+  всегда идёт через локальный клиент VK TURN.
+
+Дальше — обычная кнопка подключения. Если VK попросит капчу, olcvpn
+развернёт окно и покажет страницу проверки VK; после «Я не робот» окно само
+вернётся в приложение. Режимы «Весь трафик» и «Только прокси» переключаются
+на лету: перезапускается только `sing-box`, канал через VK и пройденная капча
+остаются.
+
+Ключ WireGuard хранится в `olcvpn.json` и в интерфейс не отдаётся. Ссылка на
+звонок — тоже секрет: по ней любой может войти в ваш звонок.
+
+### Скорость
+
+На тестовом сервере (Варшава) — около 60 КБ/с в каждую сторону, втрое
+быстрее Телемоста. Замер шёл через ещё один VPN, то есть по маршруту ПК →
+Варшава → TURN VK в России → Варшава; без него путь короче, и скорость должна
+быть заметно выше.
+
+### Сервер
+
+На сервере нужны серверная часть vk-turn-proxy и WireGuard, который слушает
+только локально:
+
+    git clone https://github.com/cacggghp/vk-turn-proxy && cd vk-turn-proxy
+    git checkout v1.8.3
+    go build -trimpath -o /opt/vk-turn-proxy/server ./server
+
+`/etc/wireguard/wg-turn.conf` (ключи — `wg genkey | tee priv | wg pubkey`):
+
+    [Interface]
+    Address = 10.77.0.1/24
+    ListenPort = 51820
+    PrivateKey = <ключ сервера>
+    MTU = 1280
+    PostUp = iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -o ens1 -j MASQUERADE
+    PostDown = iptables -t nat -D POSTROUTING -s 10.77.0.0/24 -o ens1 -j MASQUERADE
+
+    [Peer]
+    PublicKey = <ключ клиента>
+    AllowedIPs = 10.77.0.2/32
+
+`/etc/systemd/system/vk-turn-proxy.service`:
+
+    [Unit]
+    Description=VK TURN proxy
+    After=network.target wg-quick@wg-turn.service
+    Wants=wg-quick@wg-turn.service
+
+    [Service]
+    ExecStart=/opt/vk-turn-proxy/server -listen 0.0.0.0:56000 -connect 127.0.0.1:51820
+    Restart=always
+    RestartSec=5
+    User=nobody
+    Group=nogroup
+
+    [Install]
+    WantedBy=multi-user.target
+
+Затем:
+
+    sysctl -w net.ipv4.ip_forward=1
+    systemctl enable --now wg-quick@wg-turn vk-turn-proxy
+    ufw allow 56000/udp
+    ufw route allow in on wg-turn out on ens1
+
+`ens1` замените на свой внешний интерфейс. Порт 51820 наружу не открывайте —
+к нему ходит только vk-turn-proxy на той же машине.
+
+Клиентский конфиг для olcvpn:
+
+    [Interface]
+    PrivateKey = <ключ клиента>
+    Address = 10.77.0.2/32
+    DNS = 1.1.1.1
+    MTU = 1280
+
+    [Peer]
+    PublicKey = <ключ сервера>
+    AllowedIPs = 0.0.0.0/0
+
+Один `[Peer]` — одно устройство: два клиента с одним ключом будут выбивать
+друг друга. Для второго устройства добавьте ещё пир с адресом `10.77.0.3/32`.
+
+### Почему клиент собран из PR
+
+В начале октября VK сменил формат капчи (`not_robot_captcha` без
+`captcha_sid`), и релиз v1.8.3 перестал получать доступ к звонку.
+`bin/vkturn-client.exe` собран из [PR #183](https://github.com/cacggghp/vk-turn-proxy/pull/183)
+(коммит `b8c4ffa`), который понимает новый формат и умеет ручную капчу через
+локальную страницу, плюс наш `patches/vkturn-no-browser.patch`: с ним клиент
+не открывает внешний браузер, капчу показывает окно olcvpn.
+
+    git clone https://github.com/NikKuz99/vk-turn-proxy && cd vk-turn-proxy
+    git checkout b8c4ffab11f2dbe473db7d2ed1fa7e455d6075f6
+    git apply ../olcvpn/patches/vkturn-no-browser.patch
+    go build -trimpath -ldflags="-s -w" -o ../olcvpn/bin/vkturn-client.exe ./client
+
+Серверная часть от формата капчи не зависит — на сервере стоит релиз v1.8.3.
+
 ## Запуск
 
     start.cmd     с правами администратора — нужно для режима «весь трафик»
@@ -162,6 +289,13 @@ KCP в один видеокадр — до 60 КБ, то есть в десят
 
 Интерфейс поднимается на `http://127.0.0.1:8899/` и открывается сам; адрес
 дублируется в файле `olcvpn.url`.
+
+API интерфейса принимает только запросы собственной страницы: заголовок
+`Host` должен быть адресом olcvpn (защита от DNS rebinding), а всё, что
+что-то меняет, — `POST` с `Content-Type: application/json`. Такой запрос
+браузер с чужого сайта без CORS-разрешения не отправит, а разрешений olcvpn
+не выдаёт. Иначе любая открытая вкладка могла бы, например, подсунуть свой
+сервер и пустить трафик через него.
 
 ## Импорт подписки
 
@@ -223,10 +357,10 @@ OlConnect_manager), и в нём есть две ловушки. Когда тр
     olcvpn.json           настройки и импортированные серверы (содержит ключи)
     olcvpn.url            адрес интерфейса
     core-config.yaml      конфиг, сгенерированный для YAML-ядра
-    sing-box-config.json  конфиг TUN
+    sing-box-config.json  конфиг sing-box (для VK TURN — с ключом WireGuard)
     data/                 рабочий каталог ядра
 
-`olcvpn.json` и `core-config.yaml` содержат ключи шифрования вашей подписки —
+`olcvpn.json`, `core-config.yaml` и `sing-box-config.json` содержат ключи —
 не выкладывайте их.
 
 ## Лицензия

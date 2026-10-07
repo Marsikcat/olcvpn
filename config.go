@@ -22,6 +22,30 @@ type Server struct {
 	ClientID  string `json:"clientId"`
 	DNS       string `json:"dns,omitempty"` // DNS этого сервера, если панель его задала
 	Core      string `json:"core"`          // legacy / empty — hint from the subscription
+
+	// Kind разделяет способы подключения: пусто — olcrtc из подписки,
+	// kindVKTurn — WireGuard через TURN-серверы звонков VK.
+	Kind   string     `json:"kind,omitempty"`
+	VKLink string     `json:"vkLink,omitempty"` // приглашение в звонок VK
+	Peer   string     `json:"peer,omitempty"`   // vk-turn-proxy на сервере, host:port
+	WG     *WireGuard `json:"wg,omitempty"`
+}
+
+const kindVKTurn = "vkturn"
+
+// isVKTurn reports whether the server is a VK TURN entry rather than an olcrtc
+// one. Such entries are added by hand and must survive subscription refreshes.
+func (s *Server) isVKTurn() bool { return s.Kind == kindVKTurn }
+
+// WireGuard is the client side of the tunnel that rides inside VK TURN.
+type WireGuard struct {
+	PrivateKey    string   `json:"privateKey"`
+	Address       []string `json:"address"`
+	PeerPublicKey string   `json:"peerPublicKey"`
+	PresharedKey  string   `json:"presharedKey,omitempty"`
+	MTU           int      `json:"mtu,omitempty"`
+	DNS           string   `json:"dns,omitempty"`
+	Keepalive     int      `json:"keepalive,omitempty"`
 }
 
 // Config is persisted next to the executable.
@@ -103,6 +127,29 @@ func (c *Config) save() error {
 		return err
 	}
 	return os.WriteFile(c.path, b, 0o600)
+}
+
+// manualServers returns the VK TURN entries — the ones added by hand, which a
+// subscription import or refresh must carry over rather than replace.
+func (c *Config) manualServers() []Server {
+	var out []Server
+	for _, s := range c.Servers {
+		if s.isVKTurn() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// subscriptionServers returns everything that came from the subscription.
+func (c *Config) subscriptionServers() []Server {
+	var out []Server
+	for _, s := range c.Servers {
+		if !s.isVKTurn() {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // hasServer reports whether id names one of the current servers.

@@ -105,6 +105,12 @@
   .srv .meta{color:var(--faint);font-size:12px}
   .srv .tick{margin-left:auto;color:var(--ok);opacity:0;width:18px;height:18px}
   .srv.sel .tick{opacity:1}
+  .flag.vk{background:#0077ff;border-color:#0077ff;color:#fff;font-weight:600}
+  .srvdel{margin-left:auto;width:26px;height:26px;flex:none;border-radius:7px;
+          border:1px solid transparent;background:none;color:var(--faint);
+          font:13px/1 inherit;cursor:pointer}
+  .srvdel:hover{color:var(--err);border-color:var(--err)}
+  .srvdel+.tick{margin-left:0}
 
   .pad{padding:14px 16px}
   label{display:block;font-size:12.5px;color:var(--dim);margin:0 0 6px}
@@ -134,7 +140,7 @@
   .msg{font-size:13px;margin-top:10px;min-height:18px}
   .msg.bad{color:var(--err)} .msg.good{color:var(--ok)}
 
-  .warn{display:flex;gap:10px;padding:12px 16px;background:rgba(224,161,58,.10);
+  .warn{display:block;padding:12px 16px;background:rgba(224,161,58,.10);
         border-top:1px solid var(--line);color:#e2b569;font-size:13px;line-height:1.5}
   .warn code{background:var(--bg2);border:1px solid var(--line);border-radius:5px;
              padding:1px 6px;font-family:ui-monospace,Consolas,monospace;color:var(--text)}
@@ -222,6 +228,46 @@
   </div>
 
   <div class="card">
+    <button class="row" id="vkRow">
+      <span class="lbl" style="color:var(--text);font-size:15px">VK TURN</span>
+      <span class="val"><span id="vkCount">—</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="m9 18 6-6-6-6"/></svg></span>
+    </button>
+    <div class="panel" id="vkPanel">
+      <div class="pad">
+        <div class="note" style="margin-top:0">
+          Быстрый способ: WireGuard идёт через TURN-серверы звонков VK, которые есть в белых
+          списках. Нужны приглашение в ваш звонок VK, адрес сервера с vk-turn-proxy и конфиг
+          WireGuard от этого сервера. Если VK попросит капчу, её страница откроется прямо здесь.
+        </div>
+
+        <label class="mt">Приглашение в звонок VK</label>
+        <input type="text" id="vkLink" placeholder="https://vk.com/call/join/…">
+
+        <label class="mt">Сервер vk-turn-proxy</label>
+        <input type="text" id="vkPeer" placeholder="203.0.113.10:56000">
+
+        <label class="mt">Конфиг WireGuard</label>
+        <textarea id="vkWG" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.77.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …"></textarea>
+        <input type="file" id="vkWGFile" accept=".conf,text/plain" hidden>
+
+        <label class="mt">Название (необязательно)</label>
+        <input type="text" id="vkName" placeholder="VK TURN · мой сервер">
+
+        <div class="btns mt">
+          <button class="btn pri" id="btnVKAdd">Добавить</button>
+          <button class="btn" id="btnVKFile">Конфиг из файла</button>
+        </div>
+        <div class="msg" id="vkMsg"></div>
+        <div class="note">
+          Звонок не завершайте «для всех» — пока он не завершён, ссылка действует.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
     <button class="row" id="advRow">
       <span class="lbl" style="color:var(--text);font-size:15px">Дополнительно</span>
       <span class="val">
@@ -296,7 +342,8 @@ async function api(path, body){
 function view(){
   const p = st.phase;
   if(p === 'stopped')  return {k:'off',  title:'Отключено',   hint:'Нажмите, чтобы подключиться'};
-  if(p === 'starting') return {k:'busy', title:'Подключение…', hint:'Ищем сервер в комнате'};
+  if(p === 'starting') return {k:'busy', title:'Подключение…', hint: st.detail || 'Ищем сервер в комнате'};
+  if(p === 'captcha')  return {k:'busy', title:'Проверка VK', hint:'Нажмите «Я не робот» на странице VK — она откроется в этом окне'};
   if(p === 'error')    return {k:'bad',  title:'Не удалось',   hint:st.detail || 'Попробуйте ещё раз'};
   if(p === 'waiting'){
     return st.peer
@@ -339,22 +386,29 @@ function render(){
   $('modeAll').disabled = !st.admin;
 
   /* server row */
-  const sel = (st.servers || []).find(s => s.id === st.selectedId) || (st.servers || [])[0];
+  const all = st.servers || [];
+  const subSrv = all.filter(s => s.kind !== 'vkturn');
+  const vkSrv  = all.filter(s => s.kind === 'vkturn');
+  const sel = all.find(s => s.id === st.selectedId) || all[0];
   $('srvName').textContent = sel ? sel.name : 'Сервер не выбран';
-  $('srvMeta').textContent = sel ? (sel.carrier + ' · ' + sel.transport) : 'импортируйте подписку';
-  $('subCount').textContent = (st.servers || []).length
-    ? (st.servers.length + ' серв.') : 'нет';
+  $('srvMeta').textContent = !sel ? 'импортируйте подписку или добавьте VK TURN'
+    : sel.kind === 'vkturn' ? 'VK TURN · ' + sel.peer
+    : sel.carrier + ' · ' + sel.transport;
+  $('srvFlag').textContent = sel && sel.kind === 'vkturn' ? 'VK' : 'VPN';
+  $('srvFlag').classList.toggle('vk', !!sel && sel.kind === 'vkturn');
+  $('subCount').textContent = subSrv.length ? (subSrv.length + ' серв.') : 'нет';
+  $('vkCount').textContent  = vkSrv.length ? (vkSrv.length + ' серв.') : 'нет';
 
   /* Текущая подписка: имя, откуда она и сколько серверов, плюс удаление.
      Импорт другой подписки заменяет эту, поэтому подпись над полем
      говорит об этом прямо. */
-  const hasSub = (st.servers || []).length > 0;
+  const hasSub = subSrv.length > 0;
   $('curSub').hidden = !hasSub;
   if(hasSub){
     $('curSubName').textContent = st.subName || 'Без названия';
     let host = '';
     try{ host = st.subUrl ? new URL(st.subUrl).hostname : ''; }catch(_){}
-    $('curSubMeta').textContent = st.servers.length + ' серв. · ' + (host || 'добавлено ссылкой');
+    $('curSubMeta').textContent = subSrv.length + ' серв. · ' + (host || 'добавлено ссылкой');
     $('curSubAgo').textContent  = st.subUrl ? ago(st.subUpdated) : '';
     $('curSubAgo').hidden = !st.subUrl;
     /* Серверы, добавленные ссылкой на сервер, не с чего обновлять. */
@@ -365,17 +419,28 @@ function render(){
     : 'Ссылка подписки, olconnect:// или JSON из QR-кода';
 
   const panel = $('srvPanel');
-  panel.innerHTML = (st.servers || []).map(s => `
+  panel.innerHTML = all.map(s => `
     <div class="srv ${s.id === st.selectedId ? 'sel' : ''}" data-id="${s.id}">
-      <span class="flag">${(s.carrier || '?').slice(0,3).toUpperCase()}</span>
+      <span class="flag ${s.kind === 'vkturn' ? 'vk' : ''}">${s.kind === 'vkturn' ? 'VK' : (s.carrier || '?').slice(0,3).toUpperCase()}</span>
       <span><span class="nm"></span><br><span class="meta"></span></span>
+      ${s.kind === 'vkturn' ? '<button class="srvdel" title="Удалить этот сервер VK TURN">✕</button>' : ''}
       <svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <path d="M20 6 9 17l-5-5"/></svg>
     </div>`).join('');
   [...panel.querySelectorAll('.srv')].forEach((el,i) => {
-    el.querySelector('.nm').textContent = st.servers[i].name;
-    el.querySelector('.meta').textContent = 'комната ' + st.servers[i].roomId;
+    const s = all[i];
+    el.querySelector('.nm').textContent = s.name;
+    el.querySelector('.meta').textContent = s.kind === 'vkturn'
+      ? 'VK TURN · сервер ' + s.peer
+      : s.carrier + ' · ' + s.transport;
     el.onclick = async () => { await api('/api/select',{id:el.dataset.id}); refresh(); };
+    const del = el.querySelector('.srvdel');
+    if(del) del.onclick = async (e) => {
+      e.stopPropagation();
+      if(!confirm('Удалить «' + s.name + '»?')) return;
+      try{ await api('/api/server/delete', {id: s.id}); }catch(err){ alert(err.message); }
+      refresh();
+    };
   });
 
   /* warning */
@@ -455,6 +520,33 @@ const toggle = (rowId, panelId) => {
   $(rowId).onclick = () => $(panelId).classList.toggle('open');
 };
 toggle('srvRow','srvPanel'); toggle('subRow','subPanel'); toggle('advRow','advPanel');
+toggle('vkRow','vkPanel');
+
+/* ── VK TURN ─────────────────────────────────────── */
+$('btnVKFile').onclick = () => $('vkWGFile').click();
+$('vkWGFile').onchange = async () => {
+  const f = $('vkWGFile').files[0];
+  if(f) $('vkWG').value = await f.text();
+  $('vkWGFile').value = '';
+};
+$('btnVKAdd').onclick = async () => {
+  const m = $('vkMsg'), b = $('btnVKAdd');
+  b.disabled = true;
+  try{
+    await api('/api/vkturn/add', {
+      name: $('vkName').value.trim(),
+      link: $('vkLink').value.trim(),
+      peer: $('vkPeer').value.trim(),
+      wg:   $('vkWG').value,
+    });
+    /* Ключ в поле больше не нужен: он сохранён в конфиге приложения. */
+    $('vkWG').value = '';
+    m.className = 'msg good';
+    m.textContent = 'Сервер добавлен и выбран. Нажмите кнопку подключения вверху.';
+    refresh();
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+  b.disabled = false;
+};
 
 function importDone(r){
   const m = $('importMsg');

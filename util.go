@@ -203,3 +203,38 @@ func getThroughSocks(proxyAddr, host, path string, limit int64) ([]byte, error) 
 	defer resp.Body.Close()
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
+
+// apiReads are the only API calls that may come as plain GET: they change
+// nothing. Everything else must be a JSON POST.
+var apiReads = map[string]bool{
+	"/api/state": true, "/api/where": true, "/api/logs": true,
+	"/api/testip": true, "/api/update/check": true,
+}
+
+// localOnly keeps the API to our own page. Any site open in a browser can
+// fire requests at 127.0.0.1, and without this one could, say, slip in its
+// own VK TURN server and route the user's traffic through it.
+//
+//   - Host must be our address: that stops DNS rebinding, where a foreign
+//     domain is made to resolve to 127.0.0.1.
+//   - Changes must be POST with Content-Type application/json: a browser
+//     only sends that cross-origin after a CORS preflight, which we never
+//     answer, so forms, <img> and no-cors fetch cannot reach the handlers.
+func localOnly(addr string, next http.Handler) http.Handler {
+	_, port, _ := net.SplitHostPort(addr)
+	hosts := map[string]bool{addr: true, "localhost:" + port: true}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hosts[r.Host] {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") && !apiReads[r.URL.Path] {
+			ct := r.Header.Get("Content-Type")
+			if r.Method != http.MethodPost || !strings.HasPrefix(ct, "application/json") {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}

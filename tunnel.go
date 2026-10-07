@@ -59,6 +59,7 @@ const (
 	phaseProxy     phase = "proxy"     // SOCKS listening
 	phaseConnected phase = "connected" // SOCKS + TUN
 	phaseError     phase = "error"
+	phaseCaptcha   phase = "captcha" // VK TURN ждёт, пока пройдут капчу
 )
 
 // Tunnel owns the core process and the optional sing-box TUN process.
@@ -77,6 +78,15 @@ type Tunnel struct {
 	degraded  atomic.Bool // TUN не поднялся, работаем как прокси
 	lastRTT   int
 	stopping  bool
+
+	// tunOn — поднят ли системный TUN. Для olcrtc sing-box и есть TUN, а у
+	// VK TURN sing-box работает всегда (на нём держится WireGuard), поэтому
+	// одного «sing-box запущен» мало.
+	tunOn bool
+
+	// Капча VK: адрес её страницы и кто должен её показать.
+	captchaURL string
+	onCaptcha  func(url string)
 }
 
 func newTunnel(dir string, log *logBus) *Tunnel {
@@ -99,6 +109,12 @@ func (t *Tunnel) setPhase(p phase, detail string) {
 // SetTUN turns the system route on or off without dropping the session, so a
 // user can switch between "whole system" and "proxy only" mid-connection.
 func (t *Tunnel) SetTUN(cfg *Config, on bool) error {
+	t.mu.Lock()
+	srv := t.server
+	t.mu.Unlock()
+	if srv != nil && srv.isVKTurn() && t.running() {
+		return t.switchVKTurnMode(cfg, srv, on)
+	}
 	if !on {
 		t.stopSingBox()
 		if t.running() {
@@ -124,7 +140,7 @@ func (t *Tunnel) rtt() int {
 func (t *Tunnel) tunActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.singbox != nil
+	return t.singbox != nil && t.tunOn
 }
 
 func (t *Tunnel) running() bool {
@@ -361,6 +377,7 @@ func (t *Tunnel) wait(cmd *exec.Cmd) {
 	}
 	t.mu.Unlock()
 	t.stopSingBox()
+	t.leaveCaptcha()
 	if stopping {
 		t.setPhase(phaseStopped, "остановлено")
 		t.log.add("остановлено")
@@ -416,6 +433,7 @@ func (t *Tunnel) startSingBox(cfg *Config) error {
 
 	t.mu.Lock()
 	t.singbox = cmd
+	t.tunOn = true
 	t.mu.Unlock()
 
 	go func() {
@@ -434,6 +452,7 @@ func (t *Tunnel) stopSingBox() {
 	t.mu.Lock()
 	cmd := t.singbox
 	t.singbox = nil
+	t.tunOn = false
 	t.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -464,7 +483,16 @@ func (t *Tunnel) Stop() {
 	t.mu.Lock()
 	t.core = nil
 	t.mu.Unlock()
+	t.leaveCaptcha()
 	t.setPhase(phaseStopped, "остановлено")
+}
+
+// leaveCaptcha takes the window back from a VK captcha page whose client is
+// gone: the page is served by that client and would only show an error now.
+func (t *Tunnel) leaveCaptcha() {
+	if t.pendingCaptcha() != "" {
+		t.notifyCaptcha("")
+	}
 }
 
 // serverDNS prefers the resolver the panel assigned to this server: it is the

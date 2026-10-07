@@ -75,6 +75,8 @@ func runWindow(url string, a *app, t *tray) (ok bool) {
 	closeHides.Store(a.cfg.TrayClose)
 	subclass(hwnd)
 
+	a.inWindow.Store(true)
+
 	// The tray lives on another thread; every touch of the window has to be
 	// marshalled back onto this one.
 	go func() {
@@ -82,6 +84,18 @@ func runWindow(url string, a *app, t *tray) (ok bool) {
 			select {
 			case <-t.open:
 				w.Dispatch(func() { showWindowNow(hwnd) })
+			case target := <-a.nav:
+				// Капча VK: показываем её страницу прямо в окне, даже если
+				// оно было свёрнуто в трей, — без человека её не пройти. После
+				// успеха возвращаемся в интерфейс.
+				w.Dispatch(func() {
+					if target == "" {
+						w.Navigate(url)
+						return
+					}
+					showWindowNow(hwnd)
+					w.Navigate(target)
+				})
 			case <-t.quit:
 				quitting.Store(true)
 				w.Dispatch(w.Terminate)
