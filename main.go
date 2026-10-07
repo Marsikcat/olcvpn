@@ -66,6 +66,8 @@ func main() {
 	mux.HandleFunc("/api/import", a.handleImport)
 	mux.HandleFunc("/api/import-qr", a.handleImportQR)
 	mux.HandleFunc("/api/settings", a.handleSettings)
+	mux.HandleFunc("/api/subscription/delete", a.handleDeleteSubscription)
+	mux.HandleFunc("/api/subscription/refresh", a.handleRefreshSubscription)
 	mux.HandleFunc("/api/select", a.handleSelect)
 	mux.HandleFunc("/api/connect", a.handleConnect)
 	mux.HandleFunc("/api/disconnect", a.handleDisconnect)
@@ -114,6 +116,7 @@ func main() {
 	}
 
 	go a.watchUpdates()
+	go a.refreshOnStart()
 
 	t := newTray(a)
 	a.tray = t
@@ -253,6 +256,7 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 		"selectedId":      a.cfg.SelectedID,
 		"subName":         a.cfg.SubName,
 		"subUrl":          a.cfg.SubURL,
+		"subUpdated":      a.cfg.SubUpdated,
 		"socksHost":       a.cfg.SocksHost,
 		"socksPort":       a.cfg.SocksPort,
 		"dns":             a.cfg.DNS,
@@ -327,7 +331,7 @@ func (a *app) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.applyImport(res)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers), "note": res.Note})
 }
 
 func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
@@ -349,24 +353,58 @@ func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.applyImport(res)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers), "note": res.Note})
 }
 
+// applyImport replaces the current subscription with the imported one.
+//
+// Everything about the old one goes: keeping its address while showing the new
+// servers would make a later refresh silently pull the old list back.
 func (a *app) applyImport(res *importResult) {
 	a.cfg.Servers = res.Servers
+	a.cfg.SubURL = res.SubURL
+	a.cfg.SubName = res.Name
+	a.cfg.SubUpdated = time.Time{}
 	if res.SubURL != "" {
-		a.cfg.SubURL = res.SubURL
+		a.cfg.SubUpdated = time.Now()
 	}
-	if res.Name != "" {
-		a.cfg.SubName = res.Name
-	}
-	if a.cfg.SelectedID == "" || a.cfg.selected() == nil {
-		if len(res.Servers) > 0 {
-			a.cfg.SelectedID = res.Servers[0].ID
-		}
+	if !a.cfg.hasServer(a.cfg.SelectedID) && len(res.Servers) > 0 {
+		a.cfg.SelectedID = res.Servers[0].ID
 	}
 	_ = a.cfg.save()
 	a.log.addf("импортировано серверов: %d", len(res.Servers))
+	if res.Note != "" {
+		a.log.add(res.Note)
+	}
+}
+
+// handleDeleteSubscription forgets the subscription and everything derived
+// from it. The tunnel goes down first: it is running on one of these servers.
+func (a *app) handleDeleteSubscription(w http.ResponseWriter, _ *http.Request) {
+	name := a.cfg.SubName
+	if a.tun.running() {
+		a.tun.Stop()
+	}
+
+	a.cfg.Servers = nil
+	a.cfg.SelectedID = ""
+	a.cfg.SubURL = ""
+	a.cfg.SubName = ""
+	a.cfg.SubUpdated = time.Time{}
+	if err := a.cfg.save(); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	// Сгенерированный конфиг ядра хранит ключ последнего сервера — после
+	// удаления подписки ему незачем лежать на диске.
+	_ = os.Remove(filepath.Join(a.dir, "core-config.yaml"))
+
+	if name == "" {
+		name = "без названия"
+	}
+	a.log.addf("подписка удалена: %s", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {

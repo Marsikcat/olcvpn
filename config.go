@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Server is one olcrtc endpoint, normally imported from a subscription.
@@ -19,22 +20,24 @@ type Server struct {
 	VP8FPS    int    `json:"vp8Fps"`
 	VP8Batch  int    `json:"vp8Batch"`
 	ClientID  string `json:"clientId"`
-	Core      string `json:"core"` // legacy / empty — hint from the subscription
+	DNS       string `json:"dns,omitempty"` // DNS этого сервера, если панель его задала
+	Core      string `json:"core"`          // legacy / empty — hint from the subscription
 }
 
 // Config is persisted next to the executable.
 type Config struct {
-	SubURL      string   `json:"subUrl"`
-	SubName     string   `json:"subName"`
-	Servers     []Server `json:"servers"`
-	SelectedID  string   `json:"selectedId"`
-	SocksHost   string   `json:"socksHost"`
-	SocksPort   int      `json:"socksPort"`
-	DNS         string   `json:"dns"`
-	CoreBinary  string   `json:"coreBinary"`
-	UseTUN      bool     `json:"useTun"`
-	DirectIPs   string   `json:"directIps"`
-	DirectHosts string   `json:"directHosts"`
+	SubURL      string    `json:"subUrl"`
+	SubName     string    `json:"subName"`
+	SubUpdated  time.Time `json:"subUpdated,omitempty"` // когда список серверов в последний раз сверяли с панелью
+	Servers     []Server  `json:"servers"`
+	SelectedID  string    `json:"selectedId"`
+	SocksHost   string    `json:"socksHost"`
+	SocksPort   int       `json:"socksPort"`
+	DNS         string    `json:"dns"`
+	CoreBinary  string    `json:"coreBinary"`
+	UseTUN      bool      `json:"useTun"`
+	DirectIPs   string    `json:"directIps"`
+	DirectHosts string    `json:"directHosts"`
 
 	// Оформление и поведение приложения.
 	Theme       string `json:"theme"`       // auto | dark | light
@@ -100,6 +103,16 @@ func (c *Config) save() error {
 		return err
 	}
 	return os.WriteFile(c.path, b, 0o600)
+}
+
+// hasServer reports whether id names one of the current servers.
+func (c *Config) hasServer(id string) bool {
+	for i := range c.Servers {
+		if c.Servers[i].ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) selected() *Server {

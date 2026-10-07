@@ -467,6 +467,16 @@ func (t *Tunnel) Stop() {
 	t.setPhase(phaseStopped, "остановлено")
 }
 
+// serverDNS prefers the resolver the panel assigned to this server: it is the
+// one the server side was tested with, and some carriers only resolve sanely
+// through a domestic DNS.
+func serverDNS(cfg *Config, s *Server) string {
+	if s.DNS != "" {
+		return s.DNS
+	}
+	return cfg.DNS
+}
+
 func flagArgs(cfg *Config, s *Server, dataDir string) []string {
 	args := []string{
 		"-mode", "cnc",
@@ -475,16 +485,18 @@ func flagArgs(cfg *Config, s *Server, dataDir string) []string {
 		"-id", s.RoomID,
 		"-key", s.Key,
 		"-transport", s.Transport,
-		"-dns", cfg.DNS,
+		"-dns", serverDNS(cfg, s),
 		"-data", dataDir,
 		"-socks-host", cfg.SocksHost,
 		"-socks-port", strconv.Itoa(cfg.SocksPort),
 	}
 	if s.Transport == "vp8channel" {
-		args = append(args,
-			"-vp8-fps", strconv.Itoa(s.VP8FPS),
-			"-vp8-batch", strconv.Itoa(s.VP8Batch),
-		)
+		if s.VP8FPS > 0 {
+			args = append(args, "-vp8-fps", strconv.Itoa(s.VP8FPS))
+		}
+		if s.VP8Batch > 0 {
+			args = append(args, "-vp8-batch", strconv.Itoa(s.VP8Batch))
+		}
 	}
 	return args
 }
@@ -498,11 +510,20 @@ func yamlConfig(cfg *Config, s *Server) string {
 		fmt.Fprintf(&b, "  channel: %q\n", s.ClientID)
 	}
 	fmt.Fprintf(&b, "\ncrypto:\n  key: %q\n\n", s.Key)
-	fmt.Fprintf(&b, "net:\n  transport: %s\n  dns: %q\n\n", s.Transport, cfg.DNS)
+	fmt.Fprintf(&b, "net:\n  transport: %s\n  dns: %q\n\n", s.Transport, serverDNS(cfg, s))
 	fmt.Fprintf(&b, "liveness:\n  interval: 10s\n  timeout: 5s\n  failures: 3\n\n")
 	fmt.Fprintf(&b, "socks:\n  host: %q\n  port: %d\n\n", cfg.SocksHost, cfg.SocksPort)
-	if s.Transport == "vp8channel" {
-		fmt.Fprintf(&b, "vp8:\n  fps: %d\n  batch_size: %d\n\n", s.VP8FPS, s.VP8Batch)
+	// Не заданные панелью fps/batch не пишем вовсе: пусть ядро возьмёт свои
+	// умолчания, а не наши догадки о них.
+	if s.Transport == "vp8channel" && (s.VP8FPS > 0 || s.VP8Batch > 0) {
+		fmt.Fprintf(&b, "vp8:\n")
+		if s.VP8FPS > 0 {
+			fmt.Fprintf(&b, "  fps: %d\n", s.VP8FPS)
+		}
+		if s.VP8Batch > 0 {
+			fmt.Fprintf(&b, "  batch_size: %d\n", s.VP8Batch)
+		}
+		fmt.Fprintf(&b, "\n")
 	}
 	fmt.Fprintf(&b, "data: data\ndebug: true\n")
 	return b.String()

@@ -27,6 +27,7 @@ type importResult struct {
 	Name    string
 	SubURL  string
 	Servers []Server
+	Note    string // что пришлось пропустить, для пользователя
 }
 
 // insecureClient talks to the provider panel, which serves its own
@@ -40,7 +41,7 @@ var insecureClient = &http.Client{
 }
 
 // importAny accepts whatever the user pasted: a subscription JSON descriptor,
-// a subscription URL, or one or more olcrtc:// links.
+// a subscription deep link, a subscription URL, or one or more server links.
 func importAny(text string) (*importResult, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -61,7 +62,7 @@ func importAny(text string) (*importResult, error) {
 		}
 	}
 
-	// olcrtc://subscription?url=... — не сервер, а обёртка вокруг адреса
+	// olconnect://subscription?url=... — не сервер, а обёртка вокруг адреса
 	// подписки: панели раздают именно её, потому что по ней клиент потом
 	// обновляет список серверов.
 	if name, subURL, ok := subscriptionLink(text); ok {
@@ -75,21 +76,24 @@ func importAny(text string) (*importResult, error) {
 		return res, nil
 	}
 
-	if strings.Contains(text, "olcrtc://") {
-		servers := parseURIList(text)
+	if containsLink(text) || strings.Contains(text, openfluxScheme) {
+		servers, openflux := parseURIList(text)
 		if len(servers) == 0 {
+			if openflux > 0 {
+				return nil, fmt.Errorf("%s", openfluxNote(openflux))
+			}
 			return nil, fmt.Errorf(
-				"ссылка не похожа ни на сервер (olcrtc://провайдер@room/ID?key=...), " +
-					"ни на подписку (olcrtc://subscription?url=...)")
+				"ссылка не похожа ни на сервер (olconnect://провайдер@room/комната?key=...), " +
+					"ни на подписку (olconnect://subscription?url=...)")
 		}
-		return &importResult{Name: "Импорт по ссылке", Servers: servers}, nil
+		return &importResult{Name: "Импорт по ссылке", Servers: servers, Note: openfluxNote(openflux)}, nil
 	}
 
 	if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
 		return fetchSubscription(text)
 	}
 
-	return nil, fmt.Errorf("не похоже ни на ссылку подписки, ни на olcrtc:// URI")
+	return nil, fmt.Errorf("не похоже ни на ссылку подписки, ни на ссылку сервера")
 }
 
 func fetchSubscription(subURL string) (*importResult, error) {
@@ -109,9 +113,12 @@ func fetchSubscription(subURL string) (*importResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	servers := parseURIList(string(body))
+	servers, openflux := parseURIList(string(body))
 	if len(servers) == 0 {
-		return nil, fmt.Errorf("в подписке нет ни одной olcrtc:// строки")
+		if openflux > 0 {
+			return nil, fmt.Errorf("в подписке только серверы OpenFlux — это другой протокол, olcvpn его не поддерживает")
+		}
+		return nil, fmt.Errorf("в подписке нет ни одного сервера")
 	}
 	name := ""
 	for _, line := range strings.Split(string(body), "\n") {
@@ -120,19 +127,19 @@ func fetchSubscription(subURL string) (*importResult, error) {
 			break
 		}
 	}
-	return &importResult{Name: name, SubURL: subURL, Servers: servers}, nil
+	return &importResult{Name: name, SubURL: subURL, Servers: servers, Note: openfluxNote(openflux)}, nil
 }
 
 // subscriptionLink pulls the subscription address out of an
-// olcrtc://subscription?url=...&name=... link.
+// olconnect://subscription?url=...&name=... link (or its olcrtc:// twin).
 //
 // The link also carries mirror_url / mirror_key — an encrypted copy of the
-// same list on a file host, used when the panel itself is unreachable. The
-// mirror's container format is not documented anywhere we can check, so it is
-// deliberately ignored rather than guessed at.
+// same list on Yandex Disk, for when the panel itself is unreachable. Its
+// format lives in OlConnect_manager's internal/subscription/mirror; the client
+// does not read it yet and uses the primary address only.
 func subscriptionLink(text string) (name, subURL string, ok bool) {
 	for _, field := range strings.Fields(text) {
-		if !strings.HasPrefix(field, "olcrtc://subscription") {
+		if !hasLinkScheme(field) || !strings.Contains(field, "://subscription") {
 			continue
 		}
 		u, err := url.Parse(field)
@@ -152,55 +159,115 @@ func subscriptionLink(text string) (name, subURL string, ok bool) {
 	return "", "", false
 }
 
-func parseURIList(text string) []Server {
-	var out []Server
-	for _, raw := range strings.Fields(text) {
-		raw = strings.TrimSpace(raw)
-		if !strings.HasPrefix(raw, "olcrtc://") {
-			continue
-		}
-		if s, ok := parseURI(raw); ok {
-			out = append(out, s)
+// linkSchemes are the deep-link schemes the panel has used. olcrtc:// is the
+// original; on 12 September the project was renamed to OlConnect and new links
+// switched to olconnect://, while the panel still accepts both — so must we.
+var linkSchemes = []string{"olconnect://", "olcrtc://"}
+
+// openfluxScheme marks servers of a different protocol with its own binary.
+// Subscriptions can mix them in; they are skipped rather than misparsed.
+const openfluxScheme = "openflux://"
+
+func hasLinkScheme(s string) bool {
+	for _, p := range linkSchemes {
+		if strings.HasPrefix(s, p) {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
-// parseURI understands the query-string form used by current subscriptions:
+func containsLink(text string) bool {
+	for _, p := range linkSchemes {
+		if strings.Contains(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseURIList extracts every server link and reports how many OpenFlux
+// entries it had to leave out.
+func parseURIList(text string) (servers []Server, openflux int) {
+	for _, raw := range strings.Fields(text) {
+		raw = strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(raw, openfluxScheme):
+			openflux++
+		case hasLinkScheme(raw):
+			if s, ok := parseURI(raw); ok {
+				servers = append(servers, s)
+			}
+		}
+	}
+	return servers, openflux
+}
+
+// openfluxNote explains skipped OpenFlux entries, or returns "".
+func openfluxNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("пропущено серверов OpenFlux: %d — это другой протокол со своей программой, olcvpn его не поддерживает", n)
+}
+
+// parseURI understands both forms the OlConnect panel produces
+// (internal/admin/api_instances.go, buildURIWith / buildCompactURIWith):
 //
-//	olcrtc://<carrier>@room/<roomID>?key=..&transport=..&vp8_fps=..&client_id=..#label
+//	olconnect://<carrier>@room/<room>?key=..[&transport=..&vp8_fps=..&vp8_batch=..]&client_id=..#name
+//	olconnect://<carrier>@r/<escaped room>?k=..[&t=..&f=..&b=..]&c=..&d=..#name
+//
+// The long form is what subscriptions serve; the short one goes into QR codes.
+// Two conventions matter and are easy to get wrong: the panel leaves the
+// transport out entirely when it is datachannel, and the short form also drops
+// vp8 fps/batch when they equal 60/8. The room is inserted verbatim, so for
+// Jitsi — and now for Telemost too — it is a full https:// address.
 func parseURI(raw string) (Server, bool) {
+	if !hasLinkScheme(raw) {
+		return Server{}, false
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return Server{}, false
 	}
+	compact := u.Host == "r"
+	if u.Host != "room" && !compact {
+		return Server{}, false
+	}
+
 	q := u.Query()
+	pick := func(long, short string) string {
+		if v := q.Get(long); v != "" {
+			return v
+		}
+		return q.Get(short)
+	}
 
 	s := Server{
 		Carrier:   strings.ToLower(u.User.Username()),
-		Key:       q.Get("key"),
-		Transport: q.Get("transport"),
-		ClientID:  q.Get("client_id"),
+		RoomID:    strings.TrimPrefix(u.Path, "/"),
+		Key:       pick("key", "k"),
+		Transport: pick("transport", "t"),
+		ClientID:  pick("client_id", "c"),
+		DNS:       pick("dns", "d"),
 		Core:      q.Get("core"),
-		VP8FPS:    atoiDefault(q.Get("vp8_fps"), 30),
-		VP8Batch:  atoiDefault(q.Get("vp8_batch"), 64),
 	}
-
-	room := strings.TrimPrefix(u.Path, "/")
-	if u.Host != "" && u.Host != "room" {
-		// Some links put the room in the host part instead.
-		room = strings.TrimPrefix(u.Host+u.Path, "room/")
-	}
-	s.RoomID = strings.TrimPrefix(room, "room/")
-
-	if s.Carrier == "" {
-		s.Carrier = "telemost"
+	if s.Carrier == "" || s.RoomID == "" || s.Key == "" {
+		return Server{}, false
 	}
 	if s.Transport == "" {
-		s.Transport = "vp8channel"
+		s.Transport = "datachannel"
 	}
-	if s.RoomID == "" || s.Key == "" {
-		return Server{}, false
+
+	if s.Transport == "vp8channel" {
+		// Ноль значит «как решит ядро»: полная форма просто не пишет
+		// параметр, если его не задали на сервере.
+		var fps, batch int
+		if compact {
+			fps, batch = 60, 8
+		}
+		s.VP8FPS = atoiDefault(pick("vp8_fps", "f"), fps)
+		s.VP8Batch = atoiDefault(pick("vp8_batch", "b"), batch)
 	}
 
 	name, _ := url.PathUnescape(u.Fragment)

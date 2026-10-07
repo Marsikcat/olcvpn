@@ -2,8 +2,10 @@
 
 ## bin/olcrtc-fork.exe
 
-Ядро туннеля. Собрано из [Oleglog/Olcrtc_manager](https://github.com/Oleglog/Olcrtc_manager),
-коммит `bb533974c7dd` (31 августа 2026), команда `go build ./cmd/olcrtc`.
+Ядро туннеля. Собрано из [Oleglog/OlConnect_manager](https://github.com/Oleglog/OlConnect_manager)
+(бывший Olcrtc_manager), тег `server-v2.3.5`, коммит `389dea9a69d7` (21 сентября 2026),
+команда `go build ./cmd/olcrtc`. Из того же коммита собран серверный бинарник
+релиза `server-v2.3.5`.
 
 Именно этот форк — не upstream [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc) —
 стоит на серверах, поэтому только он и договаривается с ними по проводу.
