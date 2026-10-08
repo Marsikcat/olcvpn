@@ -26,9 +26,13 @@ type subDescriptor struct {
 type importResult struct {
 	Name    string
 	SubURL  string
-	Servers []Server
-	Note    string // что пришлось пропустить, для пользователя
+	Servers []Server // серверы подписки; пусто — подписку не трогать
+	Manual  []Server // серверы VK TURN — добавляются к своим, ничего не заменяя
+	Note    string   // что пришлось пропустить, для пользователя
 }
+
+// count is how many servers the import brought in total.
+func (r *importResult) count() int { return len(r.Servers) + len(r.Manual) }
 
 // insecureClient talks to the provider panel, which serves its own
 // self-signed "olcRTC Admin CA" certificate rather than a public one.
@@ -48,6 +52,28 @@ func importAny(text string) (*importResult, error) {
 		return nil, fmt.Errorf("пустой ввод")
 	}
 
+	// «Поделиться» кладёт в один текст и подписку, и серверы VK TURN:
+	// VK TURN разбираем отдельно, остальное — как раньше.
+	vk, rest, err := splitVKTurnLinks(text)
+	if err != nil && len(vk) == 0 {
+		return nil, err
+	}
+	if strings.TrimSpace(rest) == "" {
+		if len(vk) == 0 {
+			return nil, fmt.Errorf("пустой ввод")
+		}
+		return &importResult{Manual: vk}, nil
+	}
+	res, err := importSubscription(rest)
+	if err != nil {
+		return nil, err
+	}
+	res.Manual = vk
+	return res, nil
+}
+
+// importSubscription handles everything except VK TURN links.
+func importSubscription(text string) (*importResult, error) {
 	if strings.HasPrefix(text, "{") {
 		var d subDescriptor
 		if err := json.Unmarshal([]byte(text), &d); err == nil && d.URL != "" {

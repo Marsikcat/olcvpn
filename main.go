@@ -27,6 +27,7 @@ var webFS embed.FS
 
 type app struct {
 	dir  string
+	url  string // адрес интерфейса
 	log  *logBus
 	tun  *Tunnel
 	tray *tray
@@ -90,6 +91,7 @@ func main() {
 	mux.HandleFunc("/api/subscription/refresh", a.handleRefreshSubscription)
 	mux.HandleFunc("/api/vkturn/add", a.handleVKTurnAdd)
 	mux.HandleFunc("/api/server/delete", a.handleServerDelete)
+	mux.HandleFunc("/api/share", a.handleShare)
 	mux.HandleFunc("/api/select", a.handleSelect)
 	mux.HandleFunc("/api/connect", a.handleConnect)
 	mux.HandleFunc("/api/disconnect", a.handleDisconnect)
@@ -110,6 +112,7 @@ func main() {
 		}
 	}
 	url := fmt.Sprintf("http://%s/", ln.Addr().String())
+	a.url = url
 	_ = os.WriteFile(filepath.Join(dir, "olcvpn.url"), []byte(url+"\n"), 0o600)
 
 	a.log.addf("olcvpn запущен, каталог %s", dir)
@@ -375,7 +378,7 @@ func (a *app) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.applyImport(res)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers), "note": res.Note})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": res.count(), "note": res.Note})
 }
 
 func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
@@ -409,7 +412,7 @@ func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.applyImport(res)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(res.Servers), "note": res.Note})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": res.count(), "note": res.Note})
 }
 
 // applyImport replaces the current subscription with the imported one.
@@ -424,19 +427,42 @@ func (a *app) applyImport(res *importResult) {
 
 // applyImportLocked is applyImport for callers already holding cfgMu.
 func (a *app) applyImportLocked(res *importResult) {
-	// Серверы VK TURN добавлены руками и к подписке отношения не имеют.
-	a.cfg.Servers = append(append([]Server{}, res.Servers...), a.cfg.manualServers()...)
-	a.cfg.SubURL = res.SubURL
-	a.cfg.SubName = res.Name
-	a.cfg.SubUpdated = time.Time{}
-	if res.SubURL != "" {
-		a.cfg.SubUpdated = time.Now()
+	// Текст из «Поделиться» может нести только серверы VK TURN — тогда
+	// подписка остаётся как была.
+	if res.SubURL != "" || len(res.Servers) > 0 {
+		// Серверы VK TURN добавлены руками и к подписке отношения не имеют.
+		a.cfg.Servers = append(append([]Server{}, res.Servers...), a.cfg.manualServers()...)
+		a.cfg.SubURL = res.SubURL
+		a.cfg.SubName = res.Name
+		a.cfg.SubUpdated = time.Time{}
+		if res.SubURL != "" {
+			a.cfg.SubUpdated = time.Now()
+		}
 	}
-	if !a.cfg.hasServer(a.cfg.SelectedID) && len(res.Servers) > 0 {
-		a.cfg.SelectedID = res.Servers[0].ID
+	// Тот же сервер VK TURN (звонок и адрес совпадают) заменяется, а не
+	// появляется вторым.
+	for _, m := range res.Manual {
+		replaced := false
+		for i := range a.cfg.Servers {
+			if a.cfg.Servers[i].ID == m.ID {
+				a.cfg.Servers[i] = m
+				replaced = true
+			}
+		}
+		if !replaced {
+			a.cfg.Servers = append(a.cfg.Servers, m)
+		}
+	}
+	if !a.cfg.hasServer(a.cfg.SelectedID) {
+		switch {
+		case len(res.Servers) > 0:
+			a.cfg.SelectedID = res.Servers[0].ID
+		case len(res.Manual) > 0:
+			a.cfg.SelectedID = res.Manual[0].ID
+		}
 	}
 	_ = a.cfg.save()
-	a.log.addf("импортировано серверов: %d", len(res.Servers))
+	a.log.addf("импортировано серверов: %d", res.count())
 	if res.Note != "" {
 		a.log.add(res.Note)
 	}

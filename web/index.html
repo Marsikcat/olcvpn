@@ -150,6 +150,28 @@
           white-space:pre-wrap;word-break:break-word}
   #log .hi{color:var(--ok)} #log .bad{color:var(--err)} #log .wr{color:var(--warn)}
   .foot{text-align:center;color:var(--faint);font-size:12px;margin-top:18px}
+
+  /* ── поделиться ───────────────────────────────────── */
+  .share-btn{margin-left:10px;display:flex;align-items:center;gap:6px;background:var(--bg2);
+             border:1px solid var(--line);color:var(--text);border-radius:9px;padding:6px 11px;
+             font:500 13px inherit;cursor:pointer}
+  .share-btn:hover{border-color:var(--accent)}
+  .share-btn svg{width:15px;height:15px}
+  .modal{position:fixed;inset:0;z-index:10;background:rgba(0,0,0,.55);overflow:auto;
+         display:flex;align-items:flex-start;justify-content:center;padding:24px 14px}
+  .modal[hidden]{display:none}
+  .sheet{background:var(--card);border:1px solid var(--line);border-radius:18px;
+         width:100%;max-width:440px;padding:18px}
+  .sheet-head{display:flex;align-items:center;gap:10px}
+  .sheet-head h3{margin:0;font-size:17px;font-weight:600}
+  .sheet-head .srvdel{margin-left:auto}
+  .shitem{display:flex;align-items:flex-start;gap:10px;padding:7px 0;cursor:pointer}
+  .shitem input{accent-color:var(--accent);width:16px;height:16px;margin:2px 0 0;flex:none}
+  .shitem .nm{font-size:14px}
+  .shitem .meta{color:var(--faint);font-size:12px}
+  .qr{display:block;margin:14px auto 0;width:220px;height:220px;border-radius:10px;
+      background:#fff;image-rendering:pixelated}
+  .sheet .warn{border:1px solid var(--line);border-radius:10px;margin-top:14px}
 </style>
 </head>
 <body>
@@ -159,6 +181,13 @@
     <img class="logo" src="logo.png" alt="">
     <div class="title">olcvpn</div>
     <div class="sub" id="subname"></div>
+    <button class="share-btn" id="btnShare" title="Поделиться серверами" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+        <path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>
+      Поделиться
+    </button>
   </div>
 
   <section class="hero">
@@ -326,6 +355,33 @@
   <div class="foot" id="foot"></div>
 </div>
 
+<div class="modal" id="shareModal" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="shareTitle">
+    <div class="sheet-head">
+      <h3 id="shareTitle">Поделиться серверами</h3>
+      <button class="srvdel" id="shareClose" title="Закрыть">✕</button>
+    </div>
+    <div class="note" style="margin-top:4px">
+      Отправьте текст или покажите QR-код. Получатель вставляет текст в olcvpn:
+      «Подписка» → «Импортировать». Ссылку подписки понимает и OlConnect на телефоне.
+    </div>
+    <div id="shareItems" class="mt"></div>
+    <textarea id="shareText" class="mt" readonly style="min-height:92px"></textarea>
+    <div class="btns mt">
+      <button class="btn pri" id="shareCopy">Копировать</button>
+    </div>
+    <div class="msg" id="shareMsg"></div>
+    <img class="qr" id="shareQR" alt="QR-код со всеми выбранными серверами" hidden>
+    <div class="note" id="shareQRNote" style="text-align:center"></div>
+    <div class="warn">
+      Внутри — ключи доступа: кто получит текст, сможет подключаться. Каждый сервер держит
+      одно устройство за раз — если вы и получатель подключитесь к одному серверу
+      одновременно, будете выбивать друг друга. Для VK TURN другу лучше выдать свой
+      конфиг WireGuard.
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 /* Всё, что пришло извне (ответ ipinfo.io), в innerHTML — только так. */
@@ -419,8 +475,9 @@ function render(){
     $('btnRefSub').hidden = !st.subUrl;
   }
   $('importLabel').textContent = hasSub
-    ? 'Заменить подписку: ссылка, olconnect:// или JSON из QR-кода'
-    : 'Ссылка подписки, olconnect:// или JSON из QR-кода';
+    ? 'Заменить подписку: ссылка, olconnect://, olcvpn:// или JSON из QR-кода'
+    : 'Ссылка подписки, olconnect://, olcvpn:// или JSON из QR-кода';
+  $('btnShare').hidden = !all.length;
 
   const panel = $('srvPanel');
   panel.innerHTML = all.map(s => `
@@ -587,6 +644,78 @@ $('qrFile').onchange = async () => {
     importDone(await api('/api/import-qr', {data}));
   }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
 };
+
+/* ── поделиться ──────────────────────────────────────────────
+   Текст собирает olcvpn: подписка уходит ссылкой на подписку, серверы
+   VK TURN — своими ссылками. Галочки сужают выбор; null — всё. */
+let shareSel = null;
+
+async function loadShare(){
+  const m = $('shareMsg');
+  try{
+    const r = await api('/api/share', shareSel ? {ids: shareSel} : {});
+    const box = $('shareItems'); box.innerHTML = '';
+    for(const it of r.items || []){
+      const row = document.createElement('label'); row.className = 'shitem';
+      const cb = document.createElement('input'); cb.type = 'checkbox';
+      cb.checked = !shareSel || shareSel.includes(it.id);
+      cb.onchange = () => {
+        shareSel = [...box.querySelectorAll('input')].filter(x => x.checked).map(x => x.dataset.id);
+        loadShare();
+      };
+      cb.dataset.id = it.id;
+      const txt = document.createElement('span');
+      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = it.name;
+      const meta = document.createElement('span'); meta.className = 'meta'; meta.textContent = it.note;
+      txt.append(nm, document.createElement('br'), meta);
+      row.append(cb, txt);
+      box.appendChild(row);
+    }
+    $('shareText').value = r.text || '';
+    $('shareCopy').disabled = !r.text;
+    $('shareQR').hidden = !r.qr;
+    if(r.qr) $('shareQR').src = r.qr;
+    $('shareQRNote').textContent = r.text ? (r.qrNote || '') : 'Ничего не выбрано';
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+}
+
+function openShare(){
+  shareSel = null;
+  $('shareMsg').textContent = '';
+  $('shareModal').hidden = false;
+  loadShare();
+}
+function closeShare(){
+  $('shareModal').hidden = true;
+  /* Ключи не оставляем висеть в разметке скрытого окна. */
+  $('shareText').value = ''; $('shareQR').removeAttribute('src');
+}
+$('btnShare').onclick = openShare;
+$('shareClose').onclick = closeShare;
+$('shareModal').onclick = e => { if(e.target === $('shareModal')) closeShare(); };
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !$('shareModal').hidden) closeShare();
+});
+
+$('shareCopy').onclick = async () => {
+  const m = $('shareMsg'), t = $('shareText');
+  try{
+    await navigator.clipboard.writeText(t.value);
+  }catch(_){
+    t.select(); document.execCommand('copy');  /* запасной путь */
+  }
+  m.className = 'msg good'; m.textContent = 'Скопировано — отправьте в мессенджер';
+};
+
+/* Пункт «Поделиться» в меню трея открывает окно сразу на этом месте.
+   Если страница уже открыта, меняется только якорь — отсюда hashchange. */
+function shareFromHash(){
+  if(location.hash !== '#share') return;
+  history.replaceState(null, '', location.pathname);
+  openShare();
+}
+window.addEventListener('hashchange', shareFromHash);
+shareFromHash();
 
 /* «обновлено 5 мин назад» — по-человечески, без секунд. */
 function ago(iso){

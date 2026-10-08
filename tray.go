@@ -50,6 +50,7 @@ func (t *tray) onReady() {
 	systray.SetOnTapped(t.onTap)
 
 	mOpen := systray.AddMenuItem("Открыть", "")
+	mShare := systray.AddMenuItem("Поделиться серверами", "")
 	systray.AddSeparator()
 	mToggle := systray.AddMenuItem("Подключить", "")
 	systray.AddSeparator()
@@ -60,6 +61,9 @@ func (t *tray) onReady() {
 			select {
 			case <-mOpen.ClickedCh:
 				t.signal(t.open)
+
+			case <-mShare.ClickedCh:
+				t.a.openShare()
 
 			case <-mToggle.ClickedCh:
 				if t.a.tun.running() {
