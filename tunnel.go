@@ -112,7 +112,10 @@ func (t *Tunnel) SetTUN(cfg *Config, on bool) error {
 	t.mu.Lock()
 	srv := t.server
 	t.mu.Unlock()
-	if srv != nil && srv.isVKTurn() && t.running() {
+	if !t.running() {
+		return nil // режим уже сохранён и применится при подключении
+	}
+	if srv != nil && srv.isVKTurn() {
 		return t.switchVKTurnMode(cfg, srv, on)
 	}
 	if !on {

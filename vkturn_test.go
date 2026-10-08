@@ -147,6 +147,17 @@ func TestVKTurnSingBoxConfig(t *testing.T) {
 		if got := strings.Contains(string(b), "vkturn-client.exe"); got != tun {
 			t.Errorf("tun=%v: правило direct для vkturn-client.exe есть=%v", tun, got)
 		}
+		// Без перехвата DNS на адрес туннеля у системы не открывается ничего.
+		if got := strings.Contains(string(b), `"172.19.0.2/32"`); got != tun {
+			t.Errorf("tun=%v: перехват DNS на 172.19.0.2 есть=%v", tun, got)
+		}
+		// Свои процессы должны уйти напрямую раньше, чем общий перехват DNS.
+		if tun {
+			s := string(b)
+			if strings.Index(s, `"vkturn-client.exe"`) > strings.Index(s, `"protocol": "dns"`) {
+				t.Error("правило для vkturn-client.exe стоит после перехвата DNS")
+			}
+		}
 		// WireGuard шлёт на 127.0.0.1 — сокет должен быть на loopback.
 		if !strings.Contains(string(b), `"inet4_bind_address": "127.0.0.1"`) {
 			t.Errorf("tun=%v: сокет WireGuard не привязан к 127.0.0.1", tun)

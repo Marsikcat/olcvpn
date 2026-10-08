@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,11 +155,18 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 		dnsServer = "1.1.1.1"
 	}
 
+	// Свои процессы ходят мимо TUN. Без этого клиент VK TURN завернул бы в
+	// туннель собственные соединения с TURN-серверами, и туннель замкнулся бы
+	// сам на себя. Только для TUN: через прокси olcvpn.exe ходит нарочно,
+	// проверяя IP выхода, и это должно идти в туннель.
+	own := []string{"vkturn-client.exe", "sing-box.exe", "olcvpn.exe"}
+
 	inbounds := []any{
 		map[string]any{"type": "mixed", "tag": "proxy-in", "listen": cfg.SocksHost, "listen_port": cfg.SocksPort},
 	}
-	rules := []any{
-		map[string]any{"ip_is_private": true, "outbound": "direct"},
+	var rules []any
+	dnsRules := []any{
+		map[string]any{"domain_suffix": []string{"local", "lan"}, "server": "local"},
 	}
 	if withTUN {
 		inbounds = append(inbounds, map[string]any{
@@ -166,29 +174,49 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 			"address":    []string{"172.19.0.1/30"},
 			"auto_route": true, "strict_route": true, "stack": "mixed",
 		})
-		rules = append([]any{
+		rules = append(rules,
+			// Windows шлёт DNS на адрес туннеля, 172.19.0.2. Правило по
+			// protocol без сниффинга не срабатывает, поэтому перехват — по
+			// адресу; иначе запрос уйдёт по ip_is_private «напрямую» в никуда
+			// и у системы не откроется ни один сайт.
+			map[string]any{"ip_cidr": []string{"172.19.0.2/32"}, "port": 53, "action": "hijack-dns"},
+			// Выше общего перехвата DNS: клиент VK TURN резолвит адреса VK сам,
+			// через публичные DNS, и это должно идти напрямую, а не через
+			// туннель, который от него же и зависит.
+			map[string]any{"inbound": []string{"tun-in"}, "process_name": own, "outbound": "direct"},
 			map[string]any{"protocol": "dns", "action": "hijack-dns"},
-			// Без этого правила клиент VK TURN завернул бы в туннель собственные
-			// соединения с TURN-серверами — и туннель замкнулся бы сам на себя.
-			// Только для TUN: через прокси olcvpn.exe ходит нарочно, проверяя
-			// IP выхода, и это должно идти в туннель.
-			map[string]any{
-				"inbound":      []string{"tun-in"},
-				"process_name": []string{"vkturn-client.exe", "sing-box.exe", "olcvpn.exe"},
-				"outbound":     "direct",
-			},
-		}, rules...)
+		)
+		dnsRules = append([]any{map[string]any{"process_name": own, "server": "local"}}, dnsRules...)
+	}
+	// «Мимо туннеля» из настроек — как и для Телемоста.
+	if hosts := csv(cfg.DirectHosts); len(hosts) > 0 {
+		rules = append(rules, map[string]any{"domain_suffix": hosts, "outbound": "direct"})
+		dnsRules = append([]any{map[string]any{"domain_suffix": hosts, "server": "local"}}, dnsRules...)
+	}
+	if ips := csv(cfg.DirectIPs); len(ips) > 0 {
+		rules = append(rules, map[string]any{"ip_cidr": ips, "outbound": "direct"})
+	}
+	rules = append(rules, map[string]any{"ip_is_private": true, "outbound": "direct"})
+
+	dns := map[string]any{
+		"servers": []any{
+			// UDP, а не TCP: WireGuard его несёт, а TCP-рукопожатие ради
+			// каждого запроса через ПК → VK → сервер стоит лишних секунд.
+			map[string]any{"tag": "remote", "address": dnsServer, "detour": "wg"},
+			map[string]any{"tag": "local", "address": "local"},
+		},
+		"rules": dnsRules,
+		"final": "remote",
+	}
+	// Туннель только IPv4 — не раздаём приложениям IPv6-адреса, до которых
+	// через него не достучаться: они тратили бы время на попытки.
+	if !hasIPv6(wg.Address) {
+		dns["strategy"] = "ipv4_only"
 	}
 
 	conf := map[string]any{
 		"log": map[string]any{"level": "warn", "timestamp": true, "output": filepath.Join(dir, "sing-box.log")},
-		"dns": map[string]any{
-			"servers": []any{
-				map[string]any{"tag": "remote", "address": "tcp://" + dnsServer, "detour": "wg"},
-				map[string]any{"tag": "local", "address": "local"},
-			},
-			"final": "remote",
-		},
+		"dns": dns,
 		"endpoints": []any{
 			map[string]any{
 				"type": "wireguard", "tag": "wg", "system": false,
@@ -210,6 +238,16 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 		},
 	}
 	return json.MarshalIndent(conf, "", "  ")
+}
+
+// hasIPv6 reports whether any of the WireGuard interface addresses is IPv6.
+func hasIPv6(addrs []string) bool {
+	for _, a := range addrs {
+		if p, err := netip.ParsePrefix(a); err == nil && p.Addr().Is6() {
+			return true
+		}
+	}
+	return false
 }
 
 // StartVKTurn brings up a VK TURN connection: the vk-turn client first, then
