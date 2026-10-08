@@ -70,16 +70,16 @@ func (l *logBus) subscribe() (chan string, func()) {
 }
 
 // isAdmin reports whether the process is elevated. Opening a raw physical
-// drive handle succeeds only for administrators, which is enough of a probe
-// and avoids pulling in golang.org/x/sys just for the token check.
-func isAdmin() bool {
+// drive handle succeeds only for administrators, which is enough of a probe.
+// Elevation cannot change while the process runs, so it is asked once.
+var isAdmin = sync.OnceValue(func() bool {
 	f, err := os.Open(`\\.\PHYSICALDRIVE0`)
 	if err != nil {
 		return false
 	}
 	_ = f.Close()
 	return true
-}
+})
 
 // socksDial performs a SOCKS5 CONNECT to host:port through the local proxy.
 func socksDial(proxyAddr, host string, port uint16) (net.Conn, error) {

@@ -129,6 +129,17 @@ func (c *Config) save() error {
 	return os.WriteFile(c.path, b, 0o600)
 }
 
+// clone is a detached copy for code that keeps reading settings after the
+// lock is released — the tunnel builds its sing-box config minutes later.
+// It must never be saved: the original is the one on disk.
+func (c *Config) clone() *Config {
+	out := &Config{}
+	if b, err := json.Marshal(c); err == nil {
+		_ = json.Unmarshal(b, out)
+	}
+	return out
+}
+
 // manualServers returns the VK TURN entries — the ones added by hand, which a
 // subscription import or refresh must carry over rather than replace.
 func (c *Config) manualServers() []Server {
@@ -160,6 +171,16 @@ func (c *Config) hasServer(id string) bool {
 		}
 	}
 	return false
+}
+
+// server finds a server by ID and returns a copy.
+func (c *Config) server(id string) (Server, bool) {
+	for _, s := range c.Servers {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return Server{}, false
 }
 
 func (c *Config) selected() *Server {

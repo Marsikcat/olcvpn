@@ -77,7 +77,11 @@ type Tunnel struct {
 	zeroTicks int
 	degraded  atomic.Bool // TUN не поднялся, работаем как прокси
 	lastRTT   int
-	stopping  bool
+
+	// startMu делает «проверить, что не запущено, и запустить» одним шагом:
+	// кнопка в окне, меню трея и автоподключение могут сойтись разом, и
+	// тогда поднялись бы два ядра на одном порту.
+	startMu sync.Mutex
 
 	// tunOn — поднят ли системный TUN. Для olcrtc sing-box и есть TUN, а у
 	// VK TURN sing-box работает всегда (на нём держится WireGuard), поэтому
@@ -154,6 +158,8 @@ func (t *Tunnel) running() bool {
 
 // Start launches the core for srv and, once SOCKS is up, sing-box when asked.
 func (t *Tunnel) Start(cfg *Config, srv *Server, bin string, kind coreKind, withTUN bool) error {
+	t.startMu.Lock()
+	defer t.startMu.Unlock()
 	if t.running() {
 		return fmt.Errorf("уже запущено")
 	}
@@ -203,6 +209,7 @@ func (t *Tunnel) Start(cfg *Config, srv *Server, bin string, kind coreKind, with
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	bindToApp(cmd.Process)
 
 	t.mu.Lock()
 	t.core = cmd
@@ -211,7 +218,6 @@ func (t *Tunnel) Start(cfg *Config, srv *Server, bin string, kind coreKind, with
 	t.zeroTicks = 0
 	t.degraded.Store(false)
 	t.lastRTT = 0
-	t.stopping = false
 	t.mu.Unlock()
 
 	t.setPhase(phaseStarting, "запуск ядра")
@@ -330,11 +336,7 @@ func (t *Tunnel) onMetrics(line string, withTUN bool) {
 		if first {
 			t.log.add("данные пошли — туннель работает")
 		}
-		if withTUN {
-			t.setPhase(phaseConnected, "трафик идёт")
-		} else {
-			t.setPhase(phaseProxy, "трафик идёт")
-		}
+		t.setPhase(t.healthyPhase(withTUN))
 		return
 	}
 
@@ -374,23 +376,29 @@ func metricValue(line, key string) (float64, bool) {
 func (t *Tunnel) wait(cmd *exec.Cmd) {
 	err := cmd.Wait()
 	t.mu.Lock()
-	stopping := t.stopping
-	if t.core == cmd {
+	current := t.core == cmd
+	if current {
 		t.core = nil
 	}
+	vk := t.server != nil && t.server.isVKTurn()
 	t.mu.Unlock()
-	t.stopSingBox()
-	t.leaveCaptcha()
-	if stopping {
-		t.setPhase(phaseStopped, "остановлено")
-		t.log.add("остановлено")
+	if !current {
+		// Сессию закрыл Stop() и сам обо всём отчитался. Здесь уже может
+		// работать новое подключение — его sing-box и фазу трогать нельзя.
 		return
 	}
-	t.setPhase(phaseError, "ядро завершилось")
+
+	t.stopSingBox()
+	t.leaveCaptcha()
+	what := "ядро завершилось"
+	if vk {
+		what = "клиент VK TURN завершился"
+	}
+	t.setPhase(phaseError, what)
 	if err != nil {
-		t.log.addf("ядро завершилось: %v", err)
+		t.log.addf("%s: %v", what, err)
 	} else {
-		t.log.add("ядро завершилось")
+		t.log.add(what)
 	}
 }
 
@@ -433,6 +441,7 @@ func (t *Tunnel) startSingBox(cfg *Config) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	bindToApp(cmd.Process)
 
 	t.mu.Lock()
 	t.singbox = cmd
@@ -467,8 +476,10 @@ func (t *Tunnel) stopSingBox() {
 // Stop tears both processes down.
 func (t *Tunnel) Stop() {
 	t.mu.Lock()
-	t.stopping = true
 	cmd := t.core
+	// Сразу отвязываем: wait() увидит, что сессия уже не текущая, и не
+	// станет объявлять её упавшей.
+	t.core = nil
 	t.mu.Unlock()
 
 	t.stopSingBox()
@@ -481,13 +492,47 @@ func (t *Tunnel) Stop() {
 		case <-done:
 		case <-time.After(3 * time.Second):
 		}
+		t.log.add("остановлено")
 	}
 
-	t.mu.Lock()
-	t.core = nil
-	t.mu.Unlock()
 	t.leaveCaptcha()
 	t.setPhase(phaseStopped, "остановлено")
+}
+
+// serverID names the server of the running session, or "" when stopped.
+func (t *Tunnel) serverID() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.core == nil || t.server == nil {
+		return ""
+	}
+	return t.server.ID
+}
+
+// ownProcesses lists the executables that must bypass the TUN: ours, plus
+// every olcrtc core build lying next to the app. A fixed list once missed
+// olcrtc-fork.exe — the very core the release ships — so after the TUN came
+// up the core's own reconnects went into its own SOCKS and the link looped.
+func ownProcesses(dir string) []string {
+	names := []string{"olcvpn.exe", "sing-box.exe", "vkturn-client.exe", "olcrtc.exe"}
+	seen := map[string]bool{}
+	for _, n := range names {
+		seen[strings.ToLower(n)] = true
+	}
+	for _, pat := range []string{
+		filepath.Join(dir, "bin", "olcrtc*.exe"),
+		filepath.Join(dir, "olcrtc*.exe"),
+	} {
+		found, _ := filepath.Glob(pat)
+		for _, p := range found {
+			n := filepath.Base(p)
+			if !seen[strings.ToLower(n)] {
+				seen[strings.ToLower(n)] = true
+				names = append(names, n)
+			}
+		}
+	}
+	return names
 }
 
 // leaveCaptcha takes the window back from a VK captcha page whose client is
@@ -568,13 +613,13 @@ func yamlConfig(cfg *Config, s *Server) string {
 }
 
 // singBoxConfig mirrors the layout the vendor GUI uses: a TUN inbound, the
-// core's SOCKS as the only proxy outbound, and direct rules for the two
+// core's SOCKS as the only proxy outbound, and direct rules for our own
 // binaries plus whatever the user pinned, so the tunnel cannot loop on itself.
 func singBoxConfig(cfg *Config, dir string) ([]byte, error) {
 	rules := []any{
 		map[string]any{"ip_cidr": []string{"172.19.0.2/32"}, "port": 53, "action": "hijack-dns"},
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
-		map[string]any{"process_name": []string{"olcrtc-core.exe", "olcrtc.exe", "sing-box.exe", "olcvpn.exe"}, "outbound": "direct"},
+		map[string]any{"process_name": ownProcesses(dir), "outbound": "direct"},
 	}
 	if hosts := csv(cfg.DirectHosts); len(hosts) > 0 {
 		rules = append(rules, map[string]any{"domain_suffix": hosts, "outbound": "direct"})

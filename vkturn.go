@@ -159,7 +159,7 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 	// туннель собственные соединения с TURN-серверами, и туннель замкнулся бы
 	// сам на себя. Только для TUN: через прокси olcvpn.exe ходит нарочно,
 	// проверяя IP выхода, и это должно идти в туннель.
-	own := []string{"vkturn-client.exe", "sing-box.exe", "olcvpn.exe"}
+	own := ownProcesses(dir)
 
 	inbounds := []any{
 		map[string]any{"type": "mixed", "tag": "proxy-in", "listen": cfg.SocksHost, "listen_port": cfg.SocksPort},
@@ -253,6 +253,8 @@ func hasIPv6(addrs []string) bool {
 // StartVKTurn brings up a VK TURN connection: the vk-turn client first, then
 // — once it has a DTLS stream through VK — sing-box with WireGuard on top.
 func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
+	t.startMu.Lock()
+	defer t.startMu.Unlock()
 	if t.running() {
 		return fmt.Errorf("уже запущено")
 	}
@@ -289,12 +291,12 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	bindToApp(cmd.Process)
 
 	t.mu.Lock()
 	t.core = cmd
 	t.server = s
 	t.peerSeen = false
-	t.stopping = false
 	t.mu.Unlock()
 
 	t.setPhase(phaseStarting, "получаю доступ к звонку VK")
@@ -348,11 +350,29 @@ func (t *Tunnel) pumpVKTurn(r io.Reader, cfg *Config, s *Server, withTUN bool) {
 			strings.Contains(line, "all VK credentials failed"):
 			t.log.add("VK TURN: VK не выдал доступ к звонку, пробую снова")
 
-		case strings.Contains(line, "call") && strings.Contains(line, "not found"),
-			strings.Contains(line, "invalid") && strings.Contains(line, "link"):
+		case vkInteresting(line):
 			t.log.add("VK TURN: " + line)
 		}
 	}
+}
+
+// vkInteresting picks the vk-turn client lines worth showing: failures and
+// dropped streams. Without them a client that died on, say, a busy port left
+// only «завершился» in the log, with no hint why. Captcha proxy lines are
+// never shown — they carry VK session tokens.
+func vkInteresting(line string) bool {
+	for _, skip := range []string{"[Captcha Proxy]", "session_token", "failed to close TURN allocated connection"} {
+		if strings.Contains(line, skip) {
+			return false
+		}
+	}
+	l := strings.ToLower(line)
+	for _, keep := range []string{"fail", "error", "panic", "fatal", "bind", "closed dtls", "not found", "invalid"} {
+		if strings.Contains(l, keep) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Tunnel) startVKTurnSingBox(cfg *Config, s *Server, withTUN bool) error {
@@ -391,6 +411,7 @@ func (t *Tunnel) startVKTurnSingBox(cfg *Config, s *Server, withTUN bool) error 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	bindToApp(cmd.Process)
 	t.mu.Lock()
 	t.singbox = cmd
 	t.tunOn = withTUN

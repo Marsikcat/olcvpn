@@ -25,6 +25,8 @@ func (a *app) handleVKTurnAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	replaced := false
 	for i := range a.cfg.Servers {
 		if a.cfg.Servers[i].ID == srv.ID {
@@ -54,29 +56,35 @@ func (a *app) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	idx := -1
-	for i := range a.cfg.Servers {
-		if a.cfg.Servers[i].ID == body.ID {
-			idx = i
-		}
-	}
-	if idx < 0 {
+	a.cfgMu.Lock()
+	srv, ok := a.cfg.server(body.ID)
+	a.cfgMu.Unlock()
+	if !ok {
 		writeErr(w, fmt.Errorf("сервер не найден"))
 		return
 	}
-	srv := a.cfg.Servers[idx]
 	if !srv.isVKTurn() {
 		writeErr(w, fmt.Errorf("серверы подписки удаляются вместе с подпиской"))
 		return
 	}
 
-	a.tun.mu.Lock()
-	active := a.tun.core != nil && a.tun.server != nil && a.tun.server.ID == srv.ID
-	a.tun.mu.Unlock()
-	if active {
+	// Остановка ждёт процессы до трёх секунд — без замка на настройках.
+	if a.tun.serverID() == srv.ID {
 		a.tun.Stop()
 	}
 
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	idx := -1
+	for i := range a.cfg.Servers {
+		if a.cfg.Servers[i].ID == srv.ID {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true}) // уже удалён
+		return
+	}
 	a.cfg.Servers = append(a.cfg.Servers[:idx:idx], a.cfg.Servers[idx+1:]...)
 	if !a.cfg.hasServer(a.cfg.SelectedID) {
 		a.cfg.SelectedID = ""
@@ -94,6 +102,7 @@ func (a *app) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 
 // publicServers is what the UI gets: everything needed to draw the list, but
 // no key material. The page runs locally, yet keys have no business there.
+// The caller holds cfgMu.
 func (a *app) publicServers() []Server {
 	out := make([]Server, 0, len(a.cfg.Servers))
 	for _, s := range a.cfg.Servers {

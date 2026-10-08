@@ -42,17 +42,30 @@ func (d refreshDiff) String() string {
 // key or client ID was rotated on the panel counts as changed rather than as
 // one removed and one added — and stays selected.
 func (a *app) refreshSubscription() (refreshDiff, error) {
-	if a.cfg.SubURL == "" && len(a.cfg.subscriptionServers()) == 0 {
+	a.cfgMu.Lock()
+	subURL := a.cfg.SubURL
+	hasSubs := len(a.cfg.subscriptionServers()) > 0
+	a.cfgMu.Unlock()
+	if subURL == "" && !hasSubs {
 		return refreshDiff{}, fmt.Errorf("подписка не добавлена")
 	}
-	if a.cfg.SubURL == "" {
+	if subURL == "" {
 		return refreshDiff{}, fmt.Errorf(
 			"обновлять нечего: серверы добавлены ссылкой на сервер, а не подпиской")
 	}
 
-	res, err := fetchSubscription(a.cfg.SubURL)
+	// Сеть — без замка: панель может отвечать секундами.
+	res, err := fetchSubscription(subURL)
 	if err != nil {
 		return refreshDiff{}, err
+	}
+
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	// Пока шёл запрос, подписку могли удалить или заменить другой — тогда
+	// этот ответ устарел, и применять его значит воскресить старую.
+	if a.cfg.SubURL != subURL {
+		return refreshDiff{}, fmt.Errorf("подписка сменилась, пока обновлялась — обновите ещё раз")
 	}
 
 	subs := a.cfg.subscriptionServers()
@@ -60,12 +73,9 @@ func (a *app) refreshSubscription() (refreshDiff, error) {
 	for _, s := range subs {
 		old[s.ID] = s
 	}
-	running := ""
-	if a.tun.running() {
-		if s := a.cfg.selected(); s != nil {
-			running = s.ID
-		}
-	}
+	// Сравниваем с сервером, на котором туннель работает на самом деле, а
+	// не с выбранным: выбор могли сменить уже после подключения.
+	running := a.tun.serverID()
 
 	d := refreshDiff{Count: len(res.Servers), Note: res.Note}
 	seen := make(map[string]bool, len(res.Servers))
@@ -96,7 +106,7 @@ func (a *app) refreshSubscription() (refreshDiff, error) {
 	if res.Name == "" {
 		res.Name = a.cfg.SubName
 	}
-	a.applyImport(res)
+	a.applyImportLocked(res)
 
 	a.log.add(d.String())
 	if d.Reconnect {
@@ -118,7 +128,10 @@ func (a *app) handleRefreshSubscription(w http.ResponseWriter, _ *http.Request) 
 // and move rooms; a list that is a week old may point at nothing. Failure is
 // not an error here — the stored list keeps working until the panel answers.
 func (a *app) refreshOnStart() {
-	if a.cfg.SubURL == "" {
+	a.cfgMu.Lock()
+	subURL := a.cfg.SubURL
+	a.cfgMu.Unlock()
+	if subURL == "" {
 		return
 	}
 	if _, err := a.refreshSubscription(); err != nil {

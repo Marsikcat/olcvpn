@@ -142,7 +142,9 @@ func (a *app) watchUpdates() {
 	}
 	a.log.add("обновления: сети нет, проверю после подключения")
 
-	for range a.stateChanged() {
+	done := make(chan struct{})
+	defer close(done)
+	for range a.stateChanged(done) {
 		if _, _, peer := a.tun.status(); !peer {
 			continue
 		}

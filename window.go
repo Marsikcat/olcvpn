@@ -72,7 +72,10 @@ func runWindow(url string, a *app, t *tray) (ok bool) {
 	hwnd := w.Window()
 	w.SetSize(430, 620, webview2.HintMin)
 	setWindowIcon(hwnd)
+	a.cfgMu.Lock()
 	closeHides.Store(a.cfg.TrayClose)
+	startHidden := a.cfg.StartHidden
+	a.cfgMu.Unlock()
 	subclass(hwnd)
 
 	a.inWindow.Store(true)
@@ -107,7 +110,7 @@ func runWindow(url string, a *app, t *tray) (ok bool) {
 	// Прятать надо прямо здесь, а не через Dispatch: мы уже на потоке окна,
 	// а отложенный вызов сработал бы только после старта цикла сообщений —
 	// то есть окно успело бы моргнуть на экране.
-	if a.cfg.StartHidden || trayMode() {
+	if startHidden || trayMode() {
 		hideWindow(hwnd)
 	}
 

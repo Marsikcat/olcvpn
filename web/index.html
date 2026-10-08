@@ -222,6 +222,7 @@
           <button class="btn pri" id="btnImport">Импортировать</button>
           <button class="btn" id="btnQR">Из файла QR</button>
         </div>
+        <input type="file" id="qrFile" accept="image/png,image/jpeg" hidden>
         <div class="msg" id="importMsg"></div>
       </div>
     </div>
@@ -327,6 +328,9 @@
 
 <script>
 const $ = id => document.getElementById(id);
+/* Всё, что пришло извне (ответ ipinfo.io), в innerHTML — только так. */
+const esc = v => String(v).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 let st = {}, dirty = false, where = null, busy = false;
 
 async function api(path, body){
@@ -377,7 +381,7 @@ function render(){
     f.push(['IP', where.ip]);
   }
   $('facts').innerHTML = f.map(([k,val]) =>
-    `<span class="fact"><span class="k">${k}</span><b>${val}</b></span>`).join('');
+    `<span class="fact"><span class="k">${esc(k)}</span><b>${esc(val)}</b></span>`).join('');
 
   /* mode */
   const whole = st.useTun;
@@ -564,12 +568,23 @@ $('btnImport').onclick = async () => {
   }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
 };
 
-$('btnQR').onclick = async () => {
-  const p = prompt('Путь к файлу с QR-кодом:', 'F:\\olcrtc-subscription-qr.png');
-  if(!p) return;
+/* Картинку читаем здесь и отправляем целиком: вводить путь к файлу
+   руками — не то, чего ждёшь от кнопки «Из файла». */
+$('btnQR').onclick = () => $('qrFile').click();
+$('qrFile').onchange = async () => {
+  const f = $('qrFile').files[0];
+  $('qrFile').value = '';
+  if(!f) return;
   const m = $('importMsg');
+  m.className = 'msg'; m.textContent = 'Читаю QR-код…';
   try{
-    importDone(await api('/api/import-qr', {path:p}));
+    const data = await new Promise((ok, bad) => {
+      const r = new FileReader();
+      r.onload = () => ok(r.result);
+      r.onerror = () => bad(new Error('файл не читается'));
+      r.readAsDataURL(f);
+    });
+    importDone(await api('/api/import-qr', {data}));
   }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
 };
 
@@ -619,16 +634,19 @@ $('btnDelSub').onclick = async () => {
 };
 
 $('btnSave').onclick = async () => {
-  await api('/api/settings', {
-    socksPort: parseInt($('socksPort').value,10) || 8808,
-    dns: $('dns').value.trim(),
-    directHosts: $('directHosts').value.trim(),
-    directIps: $('directIps').value.trim(),
-    core: $('core').value,
-  });
-  dirty = false;
-  $('advMsg').className = 'msg good'; $('advMsg').textContent = 'Сохранено';
-  refresh();
+  const m = $('advMsg');
+  try{
+    await api('/api/settings', {
+      socksPort: parseInt($('socksPort').value,10) || 8808,
+      dns: $('dns').value.trim(),
+      directHosts: $('directHosts').value.trim(),
+      directIps: $('directIps').value.trim(),
+      core: $('core').value,
+    });
+    dirty = false;
+    m.className = 'msg good'; m.textContent = 'Сохранено';
+    refresh();
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
 };
 for(const id of ['socksPort','dns','directHosts','directIps','core'])
   $(id).addEventListener('input', () => { dirty = true; });

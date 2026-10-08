@@ -27,11 +27,23 @@ var webFS embed.FS
 
 type app struct {
 	dir  string
-	cfg  *Config
 	log  *logBus
 	tun  *Tunnel
-	kind map[string]coreKind
 	tray *tray
+
+	// cfgMu охраняет cfg. HTTP-обработчики работают параллельно, а с ними —
+	// обновление подписки при запуске, автоподключение и трей; без замка
+	// опрос состояния раз в полторы секунды читал список серверов в тот
+	// самый миг, когда его подменял импорт.
+	cfgMu sync.Mutex
+	cfg   *Config
+
+	kindMu sync.Mutex
+	kind   map[string]coreKind
+
+	// autostart кешируется: проверка запускает schtasks и reg, а окно
+	// спрашивает состояние каждые полторы секунды, даже свёрнутое в трей.
+	autostart atomic.Bool
 
 	updMu sync.Mutex
 	upd   updateInfo
@@ -127,6 +139,10 @@ func main() {
 
 	go a.watchUpdates()
 	go a.refreshOnStart()
+	go func() {
+		a.autostart.Store(autostartEnabled())
+		a.repairAutostart()
+	}()
 
 	t := newTray(a)
 	a.tray = t
@@ -210,10 +226,14 @@ func (a *app) cores() []coreInfo {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
+		a.kindMu.Lock()
 		k, ok := a.kind[p]
+		a.kindMu.Unlock()
 		if !ok {
 			k = detectCoreKind(p)
+			a.kindMu.Lock()
 			a.kind[p] = k
+			a.kindMu.Unlock()
 		}
 		if k == coreUnknown {
 			continue
@@ -231,13 +251,20 @@ func (a *app) cores() []coreInfo {
 }
 
 func (a *app) pickCore() (coreInfo, error) {
+	a.cfgMu.Lock()
+	want := a.cfg.CoreBinary
+	a.cfgMu.Unlock()
+	return a.pickCoreNamed(want)
+}
+
+func (a *app) pickCoreNamed(want string) (coreInfo, error) {
 	cores := a.cores()
 	if len(cores) == 0 {
 		return coreInfo{}, fmt.Errorf("рядом с olcvpn.exe нет ни одного ядра olcrtc")
 	}
-	if a.cfg.CoreBinary != "" {
+	if want != "" {
 		for _, c := range cores {
-			if c.Name == a.cfg.CoreBinary || c.Path == a.cfg.CoreBinary {
+			if c.Name == want || c.Path == want {
 				return c, nil
 			}
 		}
@@ -256,39 +283,45 @@ func writeErr(w http.ResponseWriter, err error) {
 }
 
 func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
+	a.cfgMu.Lock()
+	st := map[string]any{
+		"servers":     a.publicServers(),
+		"selectedId":  a.cfg.SelectedID,
+		"subName":     a.cfg.SubName,
+		"subUrl":      a.cfg.SubURL,
+		"subUpdated":  a.cfg.SubUpdated,
+		"socksHost":   a.cfg.SocksHost,
+		"socksPort":   a.cfg.SocksPort,
+		"dns":         a.cfg.DNS,
+		"useTun":      a.cfg.UseTUN,
+		"directIps":   a.cfg.DirectIPs,
+		"directHosts": a.cfg.DirectHosts,
+		"theme":       a.cfg.Theme,
+		"autoconnect": a.cfg.Autoconnect,
+		"trayClose":   a.cfg.TrayClose,
+		"startHidden": a.cfg.StartHidden,
+		"socksAddr":   fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
+	}
+	coreWant := a.cfg.CoreBinary
+	a.cfgMu.Unlock()
+
 	ph, detail, peer := a.tun.status()
-	core, _ := a.pickCore()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"phase":           string(ph),
-		"detail":          detail,
-		"peer":            peer,
-		"servers":         a.publicServers(),
-		"captchaUrl":      a.tun.pendingCaptcha(),
-		"selectedId":      a.cfg.SelectedID,
-		"subName":         a.cfg.SubName,
-		"subUrl":          a.cfg.SubURL,
-		"subUpdated":      a.cfg.SubUpdated,
-		"socksHost":       a.cfg.SocksHost,
-		"socksPort":       a.cfg.SocksPort,
-		"dns":             a.cfg.DNS,
-		"useTun":          a.cfg.UseTUN,
-		"directIps":       a.cfg.DirectIPs,
-		"directHosts":     a.cfg.DirectHosts,
-		"cores":           a.cores(),
-		"core":            core.Name,
-		"admin":           isAdmin(),
-		"version":         version,
-		"theme":           a.cfg.Theme,
-		"autoconnect":     a.cfg.Autoconnect,
-		"trayClose":       a.cfg.TrayClose,
-		"startHidden":     a.cfg.StartHidden,
-		"autostart":       autostartEnabled(),
-		"updateLatest":    a.lastUpdateCheck().Latest,
-		"updateAvailable": a.lastUpdateCheck().Available,
-		"tunActive":       a.tun.tunActive(),
-		"socksAddr":       fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort),
-		"rtt":             a.tun.rtt(),
-	})
+	core, _ := a.pickCoreNamed(coreWant)
+	upd := a.lastUpdateCheck()
+	st["phase"] = string(ph)
+	st["detail"] = detail
+	st["peer"] = peer
+	st["captchaUrl"] = a.tun.pendingCaptcha()
+	st["cores"] = a.cores()
+	st["core"] = core.Name
+	st["admin"] = isAdmin()
+	st["version"] = version
+	st["autostart"] = a.autostart.Load()
+	st["updateLatest"] = upd.Latest
+	st["updateAvailable"] = upd.Available
+	st["tunActive"] = a.tun.tunActive()
+	st["rtt"] = a.tun.rtt()
+	writeJSON(w, http.StatusOK, st)
 }
 
 func (a *app) handleUpdateCheck(w http.ResponseWriter, _ *http.Request) {
@@ -346,14 +379,26 @@ func (a *app) handleImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
+	// Картинку окно присылает целиком, base64 в JSON: путь к файлу
+	// пользователю пришлось бы вводить руками.
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 	var body struct {
 		Path string `json:"path"`
+		Data string `json:"data"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, err)
 		return
 	}
-	text, err := decodeQRFile(strings.Trim(strings.TrimSpace(body.Path), `"`))
+	var (
+		text string
+		err  error
+	)
+	if body.Data != "" {
+		text, err = decodeQRBase64(body.Data)
+	} else {
+		text, err = decodeQRFile(strings.Trim(strings.TrimSpace(body.Path), `"`))
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -372,6 +417,13 @@ func (a *app) handleImportQR(w http.ResponseWriter, r *http.Request) {
 // Everything about the old one goes: keeping its address while showing the new
 // servers would make a later refresh silently pull the old list back.
 func (a *app) applyImport(res *importResult) {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	a.applyImportLocked(res)
+}
+
+// applyImportLocked is applyImport for callers already holding cfgMu.
+func (a *app) applyImportLocked(res *importResult) {
 	// Серверы VK TURN добавлены руками и к подписке отношения не имеют.
 	a.cfg.Servers = append(append([]Server{}, res.Servers...), a.cfg.manualServers()...)
 	a.cfg.SubURL = res.SubURL
@@ -395,15 +447,21 @@ func (a *app) applyImport(res *importResult) {
 func (a *app) handleDeleteSubscription(w http.ResponseWriter, _ *http.Request) {
 	// Повторный клик, пока окно не успело обновиться, не должен писать в
 	// журнал «подписка удалена» на пустом месте.
-	if len(a.cfg.subscriptionServers()) == 0 && a.cfg.SubURL == "" {
+	a.cfgMu.Lock()
+	empty := len(a.cfg.subscriptionServers()) == 0 && a.cfg.SubURL == ""
+	a.cfgMu.Unlock()
+	if empty {
 		writeErr(w, fmt.Errorf("подписка не добавлена"))
 		return
 	}
-	name := a.cfg.SubName
+	// Остановка ждёт ядро до трёх секунд — без замка, чтобы окно не
+	// подвисало на опросе состояния.
 	if a.tun.running() && !a.tun.onVKTurn() {
 		a.tun.Stop()
 	}
 
+	a.cfgMu.Lock()
+	name := a.cfg.SubName
 	a.cfg.Servers = a.cfg.manualServers()
 	if !a.cfg.hasServer(a.cfg.SelectedID) {
 		a.cfg.SelectedID = ""
@@ -411,7 +469,9 @@ func (a *app) handleDeleteSubscription(w http.ResponseWriter, _ *http.Request) {
 	a.cfg.SubURL = ""
 	a.cfg.SubName = ""
 	a.cfg.SubUpdated = time.Time{}
-	if err := a.cfg.save(); err != nil {
+	err := a.cfg.save()
+	a.cfgMu.Unlock()
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -446,10 +506,35 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if body.SocksPort != nil && (*body.SocksPort < 1 || *body.SocksPort > 65535) {
+		writeErr(w, fmt.Errorf("порт прокси должен быть от 1 до 65535"))
+		return
+	}
+
+	// Автозапуск — это вызовы schtasks и reg, их делаем без замка.
+	note := ""
+	if body.Autostart != nil {
+		var err error
+		if *body.Autostart {
+			note, err = enableAutostart()
+		} else {
+			err = disableAutostart()
+			note = "Автозапуск выключен."
+		}
+		a.autostart.Store(autostartEnabled())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		a.log.add(note)
+	}
+
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	if body.SocksHost != nil {
 		a.cfg.SocksHost = *body.SocksHost
 	}
-	if body.SocksPort != nil && *body.SocksPort > 0 {
+	if body.SocksPort != nil {
 		a.cfg.SocksPort = *body.SocksPort
 	}
 	if body.DNS != nil {
@@ -481,22 +566,6 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		a.cfg.StartHidden = *body.StartHidden
 	}
 
-	note := ""
-	if body.Autostart != nil {
-		var err error
-		if *body.Autostart {
-			note, err = enableAutostart()
-		} else {
-			err = disableAutostart()
-			note = "Автозапуск выключен."
-		}
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		a.log.add(note)
-	}
-
 	_ = a.cfg.save()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "autostartNote": note})
 }
@@ -507,6 +576,12 @@ func (a *app) handleSelect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, err)
+		return
+	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	if !a.cfg.hasServer(body.ID) {
+		writeErr(w, fmt.Errorf("сервер не найден"))
 		return
 	}
 	a.cfg.SelectedID = body.ID
@@ -525,28 +600,50 @@ func (a *app) handleConnect(w http.ResponseWriter, _ *http.Request) {
 // connectSelected starts the currently selected server. Shared by the UI and
 // the tray menu.
 func (a *app) connectSelected() error {
-	srv := a.cfg.selected()
+	// Туннель читает настройки и после старта — когда поднимает sing-box, —
+	// поэтому получает свою копию, а не общий конфиг.
+	a.cfgMu.Lock()
+	snap := a.cfg.clone()
+	a.cfgMu.Unlock()
+
+	srv := snap.selected()
 	if srv == nil {
 		return fmt.Errorf("сначала импортируйте подписку или добавьте VK TURN и выберите сервер")
 	}
 	if srv.isVKTurn() {
-		return a.tun.StartVKTurn(a.cfg, srv, a.cfg.UseTUN)
+		return a.tun.StartVKTurn(snap, srv, snap.UseTUN)
 	}
-	core, err := a.pickCore()
+	core, err := a.pickCoreNamed(snap.CoreBinary)
 	if err != nil {
 		return err
 	}
-	return a.tun.Start(a.cfg, srv, core.Path, core.Kind, a.cfg.UseTUN)
+	return a.tun.Start(snap, srv, core.Path, core.Kind, snap.UseTUN)
+}
+
+// socksAddr is the local proxy address the tunnel listens on.
+func (a *app) socksAddr() string {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort)
 }
 
 // stateChanged emits whenever the tunnel's phase or TUN state changes, so the
-// tray can follow along without polling from several places.
-func (a *app) stateChanged() <-chan struct{} {
+// tray can follow along without polling from several places. It stops when
+// done is closed; nil means never.
+func (a *app) stateChanged(done <-chan struct{}) <-chan struct{} {
 	out := make(chan struct{}, 1)
 	go func() {
+		defer close(out)
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
 		var lastPhase phase
 		var lastTUN bool
-		for range time.Tick(time.Second) {
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
 			ph, _, _ := a.tun.status()
 			tun := a.tun.tunActive()
 			if ph == lastPhase && tun == lastTUN {
@@ -575,9 +672,12 @@ func (a *app) handleTUN(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	a.cfgMu.Lock()
 	a.cfg.UseTUN = body.On
 	_ = a.cfg.save()
-	if err := a.tun.SetTUN(a.cfg, body.On); err != nil {
+	snap := a.cfg.clone()
+	a.cfgMu.Unlock()
+	if err := a.tun.SetTUN(snap, body.On); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -587,8 +687,7 @@ func (a *app) handleTUN(w http.ResponseWriter, r *http.Request) {
 // handleWhere reports where traffic currently exits, both through the tunnel
 // and around it, so the user can see at a glance whether it took effect.
 func (a *app) handleWhere(w http.ResponseWriter, _ *http.Request) {
-	addr := fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort)
-	through, errT := ipInfoThroughSocks(addr)
+	through, errT := ipInfoThroughSocks(a.socksAddr())
 	if errT != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"error": errT.Error()})
 		return
@@ -602,8 +701,7 @@ func (a *app) handleWhere(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) handleTestIP(w http.ResponseWriter, _ *http.Request) {
-	addr := fmt.Sprintf("%s:%d", a.cfg.SocksHost, a.cfg.SocksPort)
-	ip, err := publicIPThroughSocks(addr)
+	ip, err := publicIPThroughSocks(a.socksAddr())
 	if err != nil {
 		a.log.addf("проверка IP: %v", err)
 		writeErr(w, err)

@@ -44,7 +44,7 @@ func (t *tray) start() {
 }
 
 func (t *tray) onReady() {
-	systray.SetIcon(trayIcon)
+	systray.SetIcon(trayIconFor(trayOff))
 	systray.SetTitle("olcvpn")
 	systray.SetTooltip("olcvpn — отключено")
 	systray.SetOnTapped(t.onTap)
@@ -65,7 +65,12 @@ func (t *tray) onReady() {
 				if t.a.tun.running() {
 					t.a.tun.Stop()
 				} else {
-					go t.a.connectSelected()
+					go func() {
+						// Из трея ошибку больше негде показать, кроме журнала.
+						if err := t.a.connectSelected(); err != nil {
+							t.a.log.addf("подключение из трея: %v", err)
+						}
+					}()
 				}
 
 			case <-mQuit.ClickedCh:
@@ -75,9 +80,10 @@ func (t *tray) onReady() {
 		}
 	}()
 
-	// Keep the menu and tooltip in step with the tunnel.
+	// Keep the icon, menu and tooltip in step with the tunnel.
 	go func() {
-		for range t.a.stateChanged() {
+		shown := trayOff
+		for range t.a.stateChanged(nil) {
 			ph, _, _ := t.a.tun.status()
 			if t.a.tun.running() {
 				mToggle.SetTitle("Отключить")
@@ -85,6 +91,10 @@ func (t *tray) onReady() {
 				mToggle.SetTitle("Подключить")
 			}
 			systray.SetTooltip("olcvpn — " + trayLabel(ph, t.a))
+			if st := trayStateOf(ph); st != shown {
+				systray.SetIcon(trayIconFor(st))
+				shown = st
+			}
 		}
 	}()
 }
@@ -135,6 +145,8 @@ func trayLabel(ph phase, a *app) string {
 		return "отключено"
 	case phaseStarting:
 		return "подключение"
+	case phaseCaptcha:
+		return "проверка VK, пройдите капчу в окне"
 	case phaseWaiting:
 		return "нет связи с сервером"
 	case phaseError:
