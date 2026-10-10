@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // VK TURN: WireGuard, обёрнутый в DTLS, идёт к TURN-серверам звонков VK,
@@ -26,9 +27,14 @@ import (
 //	sing-box (WireGuard) → 127.0.0.1:vkturnLocalPort → vkturn-client → TURN VK → сервер
 const vkturnLocalPort = 9000
 
+// vkAccessPrefix starts the client's stdout lines that carry the VK call
+// access (the client's -access-pipe): "-" means VK no longer accepts it.
+const vkAccessPrefix = "VKTURN_ACCESS "
+
 var (
 	vkLinkRe     = regexp.MustCompile(`^https://(?:[a-z0-9-]+\.)?vk\.(?:com|ru)/call/join/[A-Za-z0-9_-]+$`)
 	captchaURLRe = regexp.MustCompile(`Open this URL in your browser:\s*(http://(?:localhost|127\.0\.0\.1):\d+\S*)`)
+	accessLifeRe = regexp.MustCompile(`Call access saved for (\S+?):`)
 )
 
 // newVKTurnServer validates what the user typed and builds a server entry.
@@ -274,6 +280,7 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 		"-peer", s.Peer,
 		"-vk-link", s.VKLink,
 		"-manual-captcha",
+		"-access-pipe",
 	)
 	cmd.Dir = t.dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -288,10 +295,23 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	if err != nil {
 		return err
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	bindToApp(cmd.Process)
+
+	// Доступ к звонку, полученный после капчи в этом запуске olcvpn, — через
+	// stdin, а не аргументом: командную строку видят все процессы. Пустая
+	// строка — доступа ещё нет, клиент пойдёт к VK и, может быть, к капче.
+	access := t.savedVKAccess(s.ID)
+	go func() {
+		_, _ = io.WriteString(stdin, access+"\n")
+		_ = stdin.Close()
+	}()
 
 	t.mu.Lock()
 	t.core = cmd
@@ -315,6 +335,10 @@ func (t *Tunnel) pumpVKTurn(r io.Reader, cfg *Config, s *Server, withTUN bool) {
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		switch {
+		case strings.HasPrefix(line, vkAccessPrefix):
+			// Доступ к звонку — в память и ни в коем случае не в журнал.
+			t.keepVKAccess(s.ID, strings.TrimPrefix(line, vkAccessPrefix))
+
 		case captchaURLRe.MatchString(line):
 			url := captchaURLRe.FindStringSubmatch(line)[1]
 			t.setPhase(phaseCaptcha, "VK просит подтвердить, что вы не робот")
@@ -322,9 +346,16 @@ func (t *Tunnel) pumpVKTurn(r io.Reader, cfg *Config, s *Server, withTUN bool) {
 			t.notifyCaptcha(url)
 
 		case strings.Contains(line, "[VK Auth] Success"):
-			t.notifyCaptcha("")
-			t.setPhase(phaseStarting, "доступ к звонку получен, подключаюсь")
-			t.log.add("VK TURN: доступ к звонку получен")
+			t.vkAuthorized()
+
+		case strings.Contains(line, "[VK Auth] Call access saved"):
+			t.log.add("VK TURN: доступ к звонку запомнен — пока olcvpn открыт и VK его принимает, переподключения пойдут без капчи" + vkAccessLife(line))
+
+		case strings.Contains(line, "[VK Auth] Using the call access saved"):
+			t.log.add("VK TURN: доступ к звонку уже есть — капча не нужна")
+
+		case strings.Contains(line, "[VK Auth] Saved call access refused"):
+			t.log.add("VK TURN: VK больше не принимает сохранённый доступ к звонку — понадобится новая проверка")
 
 		case strings.Contains(line, "Established DTLS"):
 			t.mu.Lock()
@@ -356,12 +387,88 @@ func (t *Tunnel) pumpVKTurn(r io.Reader, cfg *Config, s *Server, withTUN bool) {
 	}
 }
 
+// vkAuthorized handles «[VK Auth] Success». The client repeats it at every
+// credential refresh, about every ten minutes: only the first one and the one
+// after a captcha concern the user. Navigating the window back on each of them
+// used to reload the page under the user's hands.
+func (t *Tunnel) vkAuthorized() {
+	t.mu.Lock()
+	captcha := t.captchaURL != ""
+	connected := t.peerSeen
+	t.mu.Unlock()
+	if captcha {
+		t.notifyCaptcha("")
+	}
+	switch {
+	case !connected:
+		t.setPhase(phaseStarting, "доступ к звонку получен, подключаюсь")
+		t.log.add("VK TURN: доступ к звонку получен")
+	case captcha:
+		// Капча посреди сессии: канал уже поднят, возвращаем рабочую фазу.
+		t.log.add("VK TURN: доступ к звонку получен")
+		t.mu.Lock()
+		up, tun := t.singbox != nil, t.tunOn
+		t.mu.Unlock()
+		switch {
+		case up && tun:
+			t.setPhase(phaseConnected, "VK TURN, весь трафик")
+		case up:
+			t.setPhase(phaseProxy, "VK TURN")
+		}
+	}
+}
+
+// keepVKAccess remembers the call access the client reported for a server,
+// or forgets it when the client says VK refused it.
+func (t *Tunnel) keepVKAccess(serverID, data string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if data == "" || data == "-" {
+		delete(t.vkAccess, serverID)
+		return
+	}
+	if t.vkAccess == nil {
+		t.vkAccess = map[string]string{}
+	}
+	t.vkAccess[serverID] = data
+}
+
+// savedVKAccess returns the call access kept for a server, "" if none.
+func (t *Tunnel) savedVKAccess(serverID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.vkAccess[serverID]
+}
+
+// vkAccessLife renders how long VK said the call access lasts, if it did.
+func vkAccessLife(line string) string {
+	m := accessLifeRe.FindStringSubmatch(line)
+	if m == nil {
+		return ""
+	}
+	d, err := time.ParseDuration(m[1])
+	if err != nil || d <= 0 {
+		return ""
+	}
+	h, mins := int(d.Hours()), int(d.Minutes())%60
+	var life string
+	switch {
+	case h > 0 && mins > 0:
+		life = fmt.Sprintf("%d ч %d мин", h, mins)
+	case h > 0:
+		life = fmt.Sprintf("%d ч", h)
+	default:
+		life = fmt.Sprintf("%d мин", mins)
+	}
+	return " (VK выдал его на " + life + ")"
+}
+
 // vkInteresting picks the vk-turn client lines worth showing: failures and
 // dropped streams. Without them a client that died on, say, a busy port left
 // only «завершился» in the log, with no hint why. Captcha proxy lines are
 // never shown — they carry VK session tokens.
 func vkInteresting(line string) bool {
-	for _, skip := range []string{"[Captcha Proxy]", "session_token", "failed to close TURN allocated connection"} {
+	for _, skip := range []string{"[Captcha Proxy]", "session_token", "failed to close TURN allocated connection", vkAccessPrefix} {
 		if strings.Contains(line, skip) {
 			return false
 		}

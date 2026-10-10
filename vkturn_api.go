@@ -72,6 +72,7 @@ func (a *app) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 	if a.tun.serverID() == srv.ID {
 		a.tun.Stop()
 	}
+	a.tun.keepVKAccess(srv.ID, "") // доступ к звонку удалённого сервера не нужен
 
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()

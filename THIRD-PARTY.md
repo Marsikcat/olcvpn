@@ -37,15 +37,18 @@ VK TURN, где он же поднимает WireGuard.
 только для серверов VK TURN. Собран из
 [PR #183](https://github.com/cacggghp/vk-turn-proxy/pull/183)
 ([NikKuz99/vk-turn-proxy](https://github.com/NikKuz99/vk-turn-proxy), ветка
-`fix/captcha-tls-auto-solver`, коммит `b8c4ffab11f2`) **с одной правкой** —
-`patches/vkturn-no-browser.patch` в этом репозитории: при `VKTURN_NO_BROWSER=1`
-клиент не открывает внешний браузер для капчи, её показывает окно olcvpn.
+`fix/captcha-tls-auto-solver`, коммит `b8c4ffab11f2`) **с двумя правками** из
+папки `patches/` этого репозитория: `vkturn-no-browser.patch` — при
+`VKTURN_NO_BROWSER=1` клиент не открывает внешний браузер для капчи, её
+показывает окно olcvpn; `vkturn-call-access.patch` — доступ к звонку,
+полученный после капчи, переиспользуется для новых учёток TURN и с флагом
+`-access-pipe` передаётся olcvpn, так что капча нужна раз за запуск.
 
 PR нужен потому, что релиз v1.8.3 не понимает новый формат капчи VK
 (октябрь 2026) и не получает доступ к звонку.
 
 Лицензия: GPL-3.0. Полный исходный код этой сборки — коммит по ссылке выше
-плюс патч из этого репозитория; как собрать — в README, раздел «VK TURN».
+плюс патчи из этого репозитория; как собрать — в README, раздел «VK TURN».
 Текст лицензии лежит рядом: `bin/vkturn-client.LICENSE`. Если VK TURN не
 нужен, файл можно удалить — остальное работает без него.
 

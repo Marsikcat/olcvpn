@@ -91,6 +91,11 @@ type Tunnel struct {
 	// Капча VK: адрес её страницы и кто должен её показать.
 	captchaURL string
 	onCaptcha  func(url string)
+
+	// vkAccess — доступ к звонку VK, полученный после капчи, по ID сервера.
+	// Живёт только в памяти, пока открыт olcvpn: клиент VK TURN получает его
+	// при каждом запуске, и переподключение обходится без новой капчи.
+	vkAccess map[string]string
 }
 
 func newTunnel(dir string, log *logBus) *Tunnel {

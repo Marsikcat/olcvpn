@@ -1,0 +1,577 @@
+diff --git a/client/call_access.go b/client/call_access.go
+new file mode 100644
+index 0000000..5e1ce48
+--- /dev/null
++++ b/client/call_access.go
+@@ -0,0 +1,180 @@
++package main
++
++// Saved VK call access.
++//
++// calls.getAnonymousToken is the only step of the VK auth chain that asks for
++// a captcha, and the anonymous call token it returns can be replayed: fresh
++// TURN credentials need only that token and a throwaway OK session
++// (auth.anonymLogin + vchat.joinConversationByLink). So the token is kept for
++// as long as VK accepts it, and the credential refreshes every ten minutes and
++// the stream reconnects no longer go through the captcha.
++//
++// With -access-pipe a host app can keep the token across restarts of this
++// client: a saved one is read as a single line from stdin at start, and every
++// change is written to stdout as "VKTURN_ACCESS <data>" ("VKTURN_ACCESS -"
++// once VK refuses it). The data is opaque to the host.
++
++import (
++	"bufio"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"os"
++	"strings"
++	"sync"
++	"time"
++)
++
++const callAccessLinePrefix = "VKTURN_ACCESS "
++
++// callAccessOut is where the pipe lines go: stdout, read by the host app.
++var callAccessOut io.Writer = os.Stdout
++
++type callAccess struct {
++	Link    string    `json:"link"`
++	Token   string    `json:"token"`
++	Expires time.Time `json:"exp,omitzero"` // zero: VK did not say, keep it until VK refuses it
++}
++
++func (a *callAccess) usable(link string) bool {
++	if a == nil || a.Link != link || a.Token == "" {
++		return false
++	}
++	return a.Expires.IsZero() || time.Now().Before(a.Expires.Add(-time.Minute))
++}
++
++var callAccessStore struct {
++	mu   sync.Mutex
++	cur  *callAccess
++	pipe bool
++}
++
++// savedCallAccess returns the call token kept for link, or "" if there is none
++// or it has run out.
++func savedCallAccess(link string) string {
++	callAccessStore.mu.Lock()
++	defer callAccessStore.mu.Unlock()
++	if !callAccessStore.cur.usable(link) {
++		return ""
++	}
++	return callAccessStore.cur.Token
++}
++
++// keepCallAccess saves the call token VK gave out after the captcha.
++func keepCallAccess(link, token string) {
++	a := &callAccess{Link: link, Token: token, Expires: tokenExpiry(token)}
++	callAccessStore.mu.Lock()
++	callAccessStore.cur = a
++	callAccessStore.mu.Unlock()
++
++	life := "until VK refuses it"
++	if !a.Expires.IsZero() {
++		life = fmt.Sprintf("for %v", time.Until(a.Expires).Round(time.Minute))
++	}
++	log.Printf("[VK Auth] Call access saved %s: credential refreshes and reconnects skip the captcha", life)
++	publishCallAccess(a)
++}
++
++// dropCallAccess forgets the token for link after VK refused it.
++func dropCallAccess(link string) {
++	callAccessStore.mu.Lock()
++	cur := callAccessStore.cur
++	if cur == nil || cur.Link != link {
++		callAccessStore.mu.Unlock()
++		return
++	}
++	callAccessStore.cur = nil
++	callAccessStore.mu.Unlock()
++	publishCallAccess(nil)
++}
++
++func publishCallAccess(a *callAccess) {
++	callAccessStore.mu.Lock()
++	pipe := callAccessStore.pipe
++	callAccessStore.mu.Unlock()
++	if !pipe {
++		return
++	}
++	if a == nil {
++		fmt.Fprintln(callAccessOut, callAccessLinePrefix+"-")
++		return
++	}
++	b, err := json.Marshal(a)
++	if err != nil {
++		return
++	}
++	fmt.Fprintln(callAccessOut, callAccessLinePrefix+base64.StdEncoding.EncodeToString(b))
++}
++
++// readCallAccess enables the pipe and takes the access a host app saved from
++// an earlier run of this client, if it wrote one.
++func readCallAccess(r io.Reader, link string) {
++	callAccessStore.mu.Lock()
++	callAccessStore.pipe = true
++	callAccessStore.mu.Unlock()
++
++	lineCh := make(chan string, 1)
++	go func() {
++		s, _ := bufio.NewReader(r).ReadString('\n')
++		lineCh <- s
++	}()
++	var line string
++	select {
++	case line = <-lineCh:
++	case <-time.After(3 * time.Second):
++		log.Printf("[VK Auth] No saved call access on stdin")
++		return
++	}
++	line = strings.TrimSpace(line)
++	if line == "" || line == "-" {
++		return
++	}
++
++	var a callAccess
++	b, err := base64.StdEncoding.DecodeString(line)
++	if err == nil {
++		err = json.Unmarshal(b, &a)
++	}
++	switch {
++	case err != nil:
++		log.Printf("[VK Auth] Saved call access is unreadable, ignoring it: %v", err)
++	case a.Link != link:
++		log.Printf("[VK Auth] Saved call access is for another call, ignoring it")
++	case !a.usable(link):
++		log.Printf("[VK Auth] Saved call access has run out")
++	default:
++		callAccessStore.mu.Lock()
++		callAccessStore.cur = &a
++		callAccessStore.mu.Unlock()
++		log.Printf("[VK Auth] Using the call access saved by the host app")
++	}
++}
++
++// tokenExpiry reads exp from a JWT-shaped token; zero when it has none.
++func tokenExpiry(token string) time.Time {
++	for _, part := range strings.Split(token, ".") {
++		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(part, "="))
++		if err != nil {
++			continue
++		}
++		var claims struct {
++			Exp int64 `json:"exp"`
++		}
++		if json.Unmarshal(b, &claims) == nil && claims.Exp > 0 {
++			return time.Unix(claims.Exp, 0)
++		}
++	}
++	return time.Time{}
++}
++
++// callJoinRefused is VK's answer — not a network failure — to joining the
++// call: with a saved call token it means the token is no good any more.
++type callJoinRefused struct {
++	resp map[string]interface{}
++}
++
++func (e *callJoinRefused) Error() string {
++	return fmt.Sprintf("missing turn_server in response: %v", e.resp)
++}
+diff --git a/client/call_access_test.go b/client/call_access_test.go
+new file mode 100644
+index 0000000..0dd420b
+--- /dev/null
++++ b/client/call_access_test.go
+@@ -0,0 +1,152 @@
++package main
++
++import (
++	"bytes"
++	"encoding/base64"
++	"fmt"
++	"io"
++	"strings"
++	"testing"
++	"time"
++)
++
++func resetCallAccess(t *testing.T) *bytes.Buffer {
++	t.Helper()
++	var out bytes.Buffer
++	prev := callAccessOut
++	callAccessOut = &out
++	callAccessStore.mu.Lock()
++	callAccessStore.cur = nil
++	callAccessStore.pipe = false
++	callAccessStore.mu.Unlock()
++	t.Cleanup(func() {
++		callAccessOut = prev
++		callAccessStore.mu.Lock()
++		callAccessStore.cur = nil
++		callAccessStore.pipe = false
++		callAccessStore.mu.Unlock()
++	})
++	return &out
++}
++
++func fakeJWT(exp time.Time) string {
++	enc := base64.RawURLEncoding.EncodeToString
++	return enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." +
++		enc([]byte(fmt.Sprintf(`{"iat":1,"exp":%d}`, exp.Unix()))) + ".c2ln"
++}
++
++func TestTokenExpiry(t *testing.T) {
++	exp := time.Now().Add(24 * time.Hour).Truncate(time.Second)
++	if got := tokenExpiry(fakeJWT(exp)); !got.Equal(exp) {
++		t.Errorf("tokenExpiry(jwt) = %v, want %v", got, exp)
++	}
++	// token1 from login.vk.ru has a prefix part before the JWT.
++	if got := tokenExpiry("vk1.a." + fakeJWT(exp)); !got.Equal(exp) {
++		t.Errorf("tokenExpiry(prefixed jwt) = %v, want %v", got, exp)
++	}
++	for _, opaque := range []string{"", "abc", "abc.def", "a.e30.b"} {
++		if got := tokenExpiry(opaque); !got.IsZero() {
++			t.Errorf("tokenExpiry(%q) = %v, want zero", opaque, got)
++		}
++	}
++}
++
++func TestCallAccessKeptAndDropped(t *testing.T) {
++	out := resetCallAccess(t)
++
++	keepCallAccess("LINK", "opaque-token")
++	if got := savedCallAccess("LINK"); got != "opaque-token" {
++		t.Fatalf("saved = %q", got)
++	}
++	if got := savedCallAccess("OTHER"); got != "" {
++		t.Errorf("token of another call handed out: %q", got)
++	}
++	if out.Len() != 0 {
++		t.Errorf("pipe is off, but printed %q", out.String())
++	}
++
++	dropCallAccess("OTHER") // not ours: nothing happens
++	if savedCallAccess("LINK") == "" {
++		t.Fatal("dropping another call's access dropped ours")
++	}
++	dropCallAccess("LINK")
++	if got := savedCallAccess("LINK"); got != "" {
++		t.Errorf("still saved after drop: %q", got)
++	}
++}
++
++func TestCallAccessExpires(t *testing.T) {
++	resetCallAccess(t)
++	keepCallAccess("LINK", fakeJWT(time.Now().Add(30*time.Second)))
++	if got := savedCallAccess("LINK"); got != "" {
++		t.Error("a token that runs out within the safety minute is still handed out")
++	}
++	keepCallAccess("LINK", fakeJWT(time.Now().Add(time.Hour)))
++	if savedCallAccess("LINK") == "" {
++		t.Error("a token with an hour left is not handed out")
++	}
++}
++
++// The host app keeps the access between runs: what one run prints, the next
++// one reads back from stdin.
++func TestCallAccessPipeRoundTrip(t *testing.T) {
++	out := resetCallAccess(t)
++	readCallAccess(strings.NewReader(""), "LINK") // first run: nothing saved yet
++	if savedCallAccess("LINK") != "" {
++		t.Fatal("access out of nowhere")
++	}
++
++	token := fakeJWT(time.Now().Add(24 * time.Hour))
++	keepCallAccess("LINK", token)
++	line := strings.TrimSpace(out.String())
++	if !strings.HasPrefix(line, callAccessLinePrefix) {
++		t.Fatalf("pipe line = %q", line)
++	}
++	saved := strings.TrimPrefix(line, callAccessLinePrefix)
++
++	// Next run of the client.
++	resetCallAccess(t)
++	readCallAccess(strings.NewReader(saved+"\n"), "LINK")
++	if got := savedCallAccess("LINK"); got != token {
++		t.Fatalf("after restart saved = %q, want the token", got)
++	}
++
++	// Another call link must not pick it up.
++	resetCallAccess(t)
++	readCallAccess(strings.NewReader(saved+"\n"), "OTHER")
++	if savedCallAccess("OTHER") != "" || savedCallAccess("LINK") != "" {
++		t.Error("access for another call was taken")
++	}
++
++	// Refused by VK: the host app is told to forget it.
++	out = resetCallAccess(t)
++	readCallAccess(strings.NewReader(saved), "LINK")
++	dropCallAccess("LINK")
++	if got := strings.TrimSpace(out.String()); got != callAccessLinePrefix+"-" {
++		t.Errorf("after drop printed %q", got)
++	}
++}
++
++func TestReadCallAccessIgnoresJunk(t *testing.T) {
++	resetCallAccess(t)
++	for _, in := range []string{"-\n", "not base64!\n", base64.StdEncoding.EncodeToString([]byte("{")) + "\n"} {
++		readCallAccess(strings.NewReader(in), "LINK")
++		if savedCallAccess("LINK") != "" {
++			t.Errorf("%q gave an access", in)
++		}
++	}
++}
++
++// A host that never writes nor closes stdin must not hang the client.
++func TestReadCallAccessDoesNotHang(t *testing.T) {
++	resetCallAccess(t)
++	r, w := io.Pipe()
++	defer w.Close()
++	done := make(chan struct{})
++	go func() { readCallAccess(r, "LINK"); close(done) }()
++	select {
++	case <-done:
++	case <-time.After(10 * time.Second):
++		t.Fatal("readCallAccess hangs on a silent stdin")
++	}
++}
+diff --git a/client/main.go b/client/main.go
+index 623d928..274c9cd 100755
+--- a/client/main.go
++++ b/client/main.go
+@@ -11,6 +11,7 @@ import (
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"encoding/json"
++	"errors"
+ 	"flag"
+ 	"fmt"
+ 	"io"
+@@ -977,6 +978,22 @@ func fetchVkCredsSerialized(ctx context.Context, link string, streamID int, dial
+ }
+ 
+ func fetchVkCreds(ctx context.Context, link string, streamID int, dialer *dnsdialer.Dialer) (string, string, string, error) {
++	if token2 := savedCallAccess(link); token2 != "" {
++		user, pass, addr, err := fetchVkCredsWithAccess(ctx, link, streamID, token2)
++		if err == nil {
++			log.Printf("[STREAM %d] [VK Auth] Success with saved call access", streamID)
++			return user, pass, addr, nil
++		}
++		var refused *callJoinRefused
++		if !errors.As(err, &refused) {
++			// A network failure says nothing about the token: keep it and let
++			// the stream retry instead of spending a captcha.
++			return "", "", "", err
++		}
++		log.Printf("[STREAM %d] [VK Auth] Saved call access refused, asking VK for a new one: %v", streamID, err)
++		dropCallAccess(link)
++	}
++
+ 	// Check Global Lockout to prevent API bans
+ 	if time.Now().Unix() < globalCaptchaLockout.Load() {
+ 		return "", "", "", fmt.Errorf("CAPTCHA_WAIT_REQUIRED: global lockout active")
+@@ -1011,14 +1028,26 @@ func fetchVkCreds(ctx context.Context, link string, streamID int, dialer *dnsdia
+ 	return "", "", "", fmt.Errorf("all VK credentials failed: %w", lastErr)
+ }
+ 
+-func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, dialer *dnsdialer.Dialer, jar tlsclient.CookieJar) (string, string, string, error) {
+-	profile := Profile{
++// fetchVkCredsWithAccess gets TURN credentials with a saved call token,
++// skipping the captcha-guarded part of the chain.
++func fetchVkCredsWithAccess(ctx context.Context, link string, streamID int, token2 string) (string, string, string, error) {
++	client, err := newVkHTTPClient(streamID, tlsclient.NewCookieJar())
++	if err != nil {
++		return "", "", "", err
++	}
++	return joinCallByLink(ctx, client, vkBrowserProfile(), link, token2)
++}
++
++func vkBrowserProfile() Profile {
++	return Profile{
+ 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+ 		SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="146", "Chromium";v="146"`,
+ 		SecChUaMobile:   "?0",
+ 		SecChUaPlatform: `"Windows"`,
+ 	}
++}
+ 
++func newVkHTTPClient(streamID int, jar tlsclient.CookieJar) (tlsclient.HttpClient, error) {
+ 	clientOpts := []tlsclient.HttpClientOption{
+ 		tlsclient.WithTimeoutSeconds(20),
+ 		tlsclient.WithClientProfile(profiles.Chrome_146),
+@@ -1041,57 +1070,70 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+ 	}
+ 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), clientOpts...)
+ 	if err != nil {
+-		return "", "", "", fmt.Errorf("failed to initialize tls_client: %w", err)
++		return nil, fmt.Errorf("failed to initialize tls_client: %w", err)
+ 	}
++	return client, nil
++}
+ 
+-	name := generateName()
+-	escapedName := neturl.QueryEscape(name)
++func vkPost(ctx context.Context, client tlsclient.HttpClient, profile Profile, data string, url string) (resp map[string]interface{}, err error) {
++	parsedURL, err := neturl.Parse(url)
++	if err != nil {
++		return nil, fmt.Errorf("parse request URL: %w", err)
++	}
++	domain := parsedURL.Hostname()
+ 
+-	log.Printf("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)
++	req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(data)))
++	if err != nil {
++		return nil, err
++	}
+ 
+-	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
+-		parsedURL, err := neturl.Parse(url)
+-		if err != nil {
+-			return nil, fmt.Errorf("parse request URL: %w", err)
++	req.Host = domain
++	applyBrowserProfileFhttp(req, profile)
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	req.Header.Set("Accept", "*/*")
++	req.Header.Set("Origin", "https://vk.ru")
++	req.Header.Set("Referer", "https://vk.ru/")
++	req.Header.Set("Sec-Fetch-Site", "same-site")
++	req.Header.Set("Sec-Fetch-Mode", "cors")
++	req.Header.Set("Sec-Fetch-Dest", "empty")
++	req.Header.Set("Priority", "u=1, i")
++
++	httpResp, err := client.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer func() {
++		if closeErr := httpResp.Body.Close(); closeErr != nil {
++			log.Printf("close response body: %s", closeErr)
+ 		}
+-		domain := parsedURL.Hostname()
++	}()
+ 
+-		req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(data)))
+-		if err != nil {
+-			return nil, err
+-		}
++	body, err := io.ReadAll(httpResp.Body)
++	if err != nil {
++		return nil, err
++	}
+ 
+-		req.Host = domain
+-		applyBrowserProfileFhttp(req, profile)
+-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+-		req.Header.Set("Accept", "*/*")
+-		req.Header.Set("Origin", "https://vk.ru")
+-		req.Header.Set("Referer", "https://vk.ru/")
+-		req.Header.Set("Sec-Fetch-Site", "same-site")
+-		req.Header.Set("Sec-Fetch-Mode", "cors")
+-		req.Header.Set("Sec-Fetch-Dest", "empty")
+-		req.Header.Set("Priority", "u=1, i")
++	err = json.Unmarshal(body, &resp)
++	if err != nil {
++		return nil, err
++	}
++	return resp, nil
++}
+ 
+-		httpResp, err := client.Do(req)
+-		if err != nil {
+-			return nil, err
+-		}
+-		defer func() {
+-			if closeErr := httpResp.Body.Close(); closeErr != nil {
+-				log.Printf("close response body: %s", closeErr)
+-			}
+-		}()
++func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, dialer *dnsdialer.Dialer, jar tlsclient.CookieJar) (string, string, string, error) {
++	profile := vkBrowserProfile()
++	client, err := newVkHTTPClient(streamID, jar)
++	if err != nil {
++		return "", "", "", err
++	}
+ 
+-		body, err := io.ReadAll(httpResp.Body)
+-		if err != nil {
+-			return nil, err
+-		}
++	name := generateName()
++	escapedName := neturl.QueryEscape(name)
+ 
+-		err = json.Unmarshal(body, &resp)
+-		if err != nil {
+-			return nil, err
+-		}
+-		return resp, nil
++	log.Printf("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)
++
++	doRequest := func(data string, url string) (map[string]interface{}, error) {
++		return vkPost(ctx, client, profile, data, url)
+ 	}
+ 
+ 	// Token 1
+@@ -1274,12 +1316,27 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+ 		break
+ 	}
+ 
++	// The captcha is behind us: keep the call token so that credential
++	// refreshes and reconnects can skip it.
++	keepCallAccess(link, token2)
++
++	return joinCallByLink(ctx, client, profile, link, token2)
++}
++
++// joinCallByLink turns an anonymous call token into TURN credentials through
++// a throwaway OK session. No captcha here: VK asks for it only when handing
++// out the call token.
++func joinCallByLink(ctx context.Context, client tlsclient.HttpClient, profile Profile, link, token2 string) (string, string, string, error) {
++	doRequest := func(data string, url string) (map[string]interface{}, error) {
++		return vkPost(ctx, client, profile, data, url)
++	}
++
+ 	vkDelayRandom(100, 150)
+ 
+ 	// Token 3
+ 	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, uuid.New())
+-	data = fmt.Sprintf("session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", neturl.QueryEscape(sessionData))
+-	resp, err = doRequest(data, "https://calls.okcdn.ru/fb.do")
++	data := fmt.Sprintf("session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", neturl.QueryEscape(sessionData))
++	resp, err := doRequest(data, "https://calls.okcdn.ru/fb.do")
+ 	if err != nil {
+ 		return "", "", "", err
+ 	}
+@@ -1299,7 +1356,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+ 
+ 	tsRaw, ok := resp["turn_server"].(map[string]interface{})
+ 	if !ok {
+-		return "", "", "", fmt.Errorf("missing turn_server in response: %v", resp)
++		return "", "", "", &callJoinRefused{resp: resp}
+ 	}
+ 	user, ok := tsRaw["username"].(string)
+ 	if !ok {
+@@ -2099,6 +2156,7 @@ func main() {
+ 	wrapMode := flag.Bool("wrap", false, "WRAP mode: SRTP-mimicry AEAD wrap DTLS packets. Peer server must use matching -wrap-key.")
+ 	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex-encoded shared key for -wrap (64 hex chars)")
+ 	genWrapKey := flag.Bool("gen-wrap-key", false, "print a fresh 64-character hex key for -wrap-key and exit")
++	accessPipe := flag.Bool("access-pipe", false, "for host apps: read a saved VK call access line from stdin at start and print every new one to stdout as \"VKTURN_ACCESS <data>\", so the captcha is passed once per host app run")
+ 	flag.Parse()
+ 
+ 	if *genWrapKey {
+@@ -2170,6 +2228,9 @@ func main() {
+ 	if idx := strings.IndexAny(link, "/?#"); idx != -1 {
+ 		link = link[:idx]
+ 	}
++	if *accessPipe && *vklink != "" {
++		readCallAccess(os.Stdin, link)
++	}
+ 
+ 	params := &turnParams{
+ 		host:     *host,
