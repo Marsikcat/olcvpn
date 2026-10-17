@@ -1,0 +1,12 @@
+# Собирается build.ps1: бэкенд, ядро и клиент VK TURN под Android.
+app/src/main/jniLibs/
+*.apk
+.gradle/
+build/
+app/build/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+.idea/
+*.iml

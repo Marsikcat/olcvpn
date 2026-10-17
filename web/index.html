@@ -172,6 +172,10 @@
   .qr{display:block;margin:14px auto 0;width:220px;height:220px;border-radius:10px;
       background:#fff;image-rendering:pixelated}
   .sheet .warn{border:1px solid var(--line);border-radius:10px;margin-top:14px}
+
+  /* ── телефон ──────────────────────────────────────── */
+  html{-webkit-tap-highlight-color:transparent}
+  @media (hover:none){ .row:hover,.srv:hover{background:none} }
 </style>
 </head>
 <body>
@@ -251,7 +255,7 @@
           <button class="btn pri" id="btnImport">Импортировать</button>
           <button class="btn" id="btnQR">Из файла QR</button>
         </div>
-        <input type="file" id="qrFile" accept="image/png,image/jpeg" hidden>
+        <input type="file" id="qrFile" accept="image/png,image/jpeg,image/*" hidden>
         <div class="msg" id="importMsg"></div>
       </div>
     </div>
@@ -318,12 +322,12 @@
 
         <label class="mt">Поведение</label>
         <label class="check"><input type="checkbox" id="autostart">
-          <span>Запускать при входе в Windows</span></label>
+          <span id="autostartLbl">Запускать при входе в Windows</span></label>
         <label class="check"><input type="checkbox" id="autoconnect">
           <span>Подключаться сразу при запуске</span></label>
-        <label class="check"><input type="checkbox" id="startHidden">
+        <label class="check desk"><input type="checkbox" id="startHidden">
           <span>Запускаться свёрнутым в трей, без окна</span></label>
-        <label class="check"><input type="checkbox" id="trayClose">
+        <label class="check desk"><input type="checkbox" id="trayClose">
           <span>Кнопка «закрыть» сворачивает в трей</span></label>
 
         <div class="grid2 mt">
@@ -372,6 +376,7 @@
     <textarea id="shareText" class="mt" readonly style="min-height:92px"></textarea>
     <div class="btns mt">
       <button class="btn pri" id="shareCopy">Копировать</button>
+      <button class="btn" id="shareSend" hidden>Отправить…</button>
     </div>
     <div class="msg" id="shareMsg"></div>
     <img class="qr" id="shareQR" alt="QR-код со всеми выбранными серверами" hidden>
@@ -392,6 +397,17 @@ const esc = v => String(v).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 let st = {}, dirty = false, where = null, busy = false;
 
+/* Оболочка Android: мост из WebView в приложение. На ПК его нет. */
+const shell = window.olcAndroid || null;
+const android = () => st.platform === 'android';
+
+/* Разрешение на VPN Android спрашивается до подключения, а не посреди него:
+   система показывает свой диалог, и ответ приходит сюда. */
+function vpnReady(){
+  if(!shell) return Promise.resolve(true);
+  return new Promise(ok => { window.olcVpnAnswer = ok; shell.prepareVpn(); });
+}
+
 async function api(path, body){
   const opt = body === undefined ? {} :
     {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
@@ -406,7 +422,7 @@ function view(){
   const p = st.phase;
   if(p === 'stopped')  return {k:'off',  title:'Отключено',   hint:'Нажмите, чтобы подключиться'};
   if(p === 'starting') return {k:'busy', title:'Подключение…', hint: st.detail || 'Ищем сервер в комнате'};
-  if(p === 'captcha')  return {k:'busy', title:'Проверка VK', hint:'Нажмите «Я не робот» на странице VK — она откроется в этом окне'};
+  if(p === 'captcha')  return {k:'busy', title:'Проверка VK', hint:'Нажмите «Я не робот» на странице VK — она откроется ' + (android() ? 'здесь' : 'в этом окне')};
   if(p === 'error')    return {k:'bad',  title:'Не удалось',   hint:st.detail || 'Попробуйте ещё раз'};
   if(p === 'waiting'){
     return st.peer
@@ -511,14 +527,24 @@ function render(){
   const wc = $('warnCard');
   if(v.k === 'on' && !st.tunActive){
     wc.hidden = false;
-    $('warn').innerHTML = 'Система туннель не использует — включён только прокси '
-      + `<code>${st.socksAddr || '127.0.0.1:8808'}</code>. Сайты вроде 2ip покажут прежний IP. `
+    $('warn').innerHTML = (android()
+      ? 'VPN не включён — работает только прокси '
+        + `<code>${esc(st.socksAddr || '127.0.0.1:8808')}</code> для приложений, где его можно указать `
+        + '(например, Telegram: SOCKS5). Остальные идут напрямую. '
+      : 'Система туннель не использует — включён только прокси '
+        + `<code>${esc(st.socksAddr || '127.0.0.1:8808')}</code>. Сайты вроде 2ip покажут прежний IP. `)
       + 'Переключитесь на «Весь трафик».';
   } else if(!st.admin){
     wc.hidden = false;
     $('warn').innerHTML = 'Запущено без прав администратора — режим «Весь трафик» недоступен. '
       + 'Закройте и откройте <code>start.cmd</code>.';
   } else wc.hidden = true;
+
+  for(const el of document.querySelectorAll('.desk')) el.hidden = android();
+  $('autostartLbl').textContent = android() ? 'Запускать при включении телефона'
+                                            : 'Запускать при входе в Windows';
+  $('btnQR').textContent = android() ? 'QR-код из фото' : 'Из файла QR';
+  $('shareSend').hidden = !shell;
 
   applyTheme(st.theme);
   for(const b of $('themeSeg').children)
@@ -545,9 +571,9 @@ function render(){
   /* Кнопку показывает и фоновая проверка приложения: она могла пройти
      позже, уже после того как окно свою проверку провалило. */
   if(st.updateAvailable) $('btnUpdate').hidden = false;
-  $('adminNote').textContent = st.admin
-    ? 'Права администратора есть.'
-    : 'Прав администратора нет — TUN недоступен.';
+  $('adminNote').textContent = android()
+    ? '«Весь трафик» работает как VPN Android: разрешение система спросит при первом подключении.'
+    : st.admin ? 'Права администратора есть.' : 'Прав администратора нет — TUN недоступен.';
   $('foot').textContent = 'ядро ' + (st.core || '—');
 }
 
@@ -561,6 +587,8 @@ $('power').onclick = async () => {
   try{
     if(st.phase === 'stopped' || st.phase === 'error'){
       where = null;
+      if(st.useTun && !await vpnReady())
+        throw new Error('Без разрешения на VPN работает только «Только прокси»');
       await api('/api/connect', {});
     } else {
       await api('/api/disconnect', {});
@@ -572,6 +600,11 @@ $('power').onclick = async () => {
 };
 
 async function setMode(on){
+  if(on && !await vpnReady()){
+    $('advMsg').className = 'msg bad';
+    $('advMsg').textContent = 'Без разрешения на VPN «Весь трафик» недоступен';
+    return;
+  }
   try{ await api('/api/tun', {on}); }
   catch(e){ $('advMsg').className = 'msg bad'; $('advMsg').textContent = e.message; }
   where = null;
@@ -640,14 +673,43 @@ $('qrFile').onchange = async () => {
   const m = $('importMsg');
   m.className = 'msg'; m.textContent = 'Читаю QR-код…';
   try{
-    const data = await new Promise((ok, bad) => {
-      const r = new FileReader();
-      r.onload = () => ok(r.result);
-      r.onerror = () => bad(new Error('файл не читается'));
-      r.readAsDataURL(f);
-    });
-    importDone(await api('/api/import-qr', {data}));
+    importDone(await api('/api/import-qr', {data: await qrPicture(f)}));
   }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+};
+
+/* Фото с телефона — это 12 Мп: распознавать такой кадр долго, а QR-коду
+   хватает и 1600 точек. Маленькие картинки и скриншоты уходят как есть. */
+async function qrPicture(f){
+  const asURL = blob => new Promise((ok, bad) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result);
+    r.onerror = () => bad(new Error('файл не читается'));
+    r.readAsDataURL(blob);
+  });
+  try{
+    const img = await createImageBitmap(f);
+    const k = 1600 / Math.max(img.width, img.height);
+    if(k < 1){
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      return c.toDataURL('image/png');
+    }
+  }catch(_){}
+  return asURL(f);
+}
+
+/* Оболочка Android передаёт сюда то, чем поделились с olcvpn: ссылку или
+   текст из мессенджера, ссылку olconnect:// из браузера, картинку с QR. */
+window.olcImport = async (text, picture) => {
+  $('subPanel').classList.add('open');
+  const m = $('importMsg');
+  m.className = 'msg'; m.textContent = 'Импортирую…';
+  try{
+    importDone(picture ? await api('/api/import-qr', {data: picture})
+                       : await api('/api/import', {text}));
+  }catch(e){ m.className = 'msg bad'; m.textContent = e.message; }
+  $('subRow').scrollIntoView({behavior:'smooth'});
 };
 
 /* ── поделиться ──────────────────────────────────────────────
@@ -705,12 +767,15 @@ document.addEventListener('keydown', e => {
 $('shareCopy').onclick = async () => {
   const m = $('shareMsg'), t = $('shareText');
   try{
-    await navigator.clipboard.writeText(t.value);
+    if(shell) shell.copy(t.value);
+    else await navigator.clipboard.writeText(t.value);
   }catch(_){
     t.select(); document.execCommand('copy');  /* запасной путь */
   }
   m.className = 'msg good'; m.textContent = 'Скопировано — отправьте в мессенджер';
 };
+
+$('shareSend').onclick = () => { if(shell) shell.share($('shareText').value); };
 
 /* Пункт «Поделиться» в меню трея открывает окно сразу на этом месте.
    Если страница уже открыта, меняется только якорь — отсюда hashchange. */
@@ -794,6 +859,8 @@ const sysLight = matchMedia('(prefers-color-scheme: light)');
 function applyTheme(mode){
   const light = mode === 'light' || (mode !== 'dark' && sysLight.matches);
   document.documentElement.classList.toggle('light', light);
+  /* Полосы системы на телефоне — в цвет страницы. */
+  if(shell && shell.setTheme) shell.setTheme(light);
 }
 sysLight.addEventListener('change', () => applyTheme(st.theme));
 
@@ -857,7 +924,8 @@ $('btnUpdate').onclick = async () => {
   const m = $('updMsg');
   $('btnUpdate').disabled = true;
   m.className = 'msg';
-  m.textContent = 'Качаю обновление, приложение перезапустится само…';
+  m.textContent = android() ? 'Качаю обновление, затем откроется установщик Android…'
+                            : 'Качаю обновление, приложение перезапустится само…';
   try{
     await api('/api/update/install', {});
   }catch(e){

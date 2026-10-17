@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -184,7 +183,7 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 	// туннель собственные соединения с TURN-серверами, и туннель замкнулся бы
 	// сам на себя. Только для TUN: через прокси olcvpn.exe ходит нарочно,
 	// проверяя IP выхода, и это должно идти в туннель.
-	own := ownProcesses(dir)
+	own := ownTraffic(dir)
 
 	inbounds := []any{
 		map[string]any{"type": "mixed", "tag": "proxy-in", "listen": cfg.SocksHost, "listen_port": cfg.SocksPort},
@@ -194,24 +193,23 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 		map[string]any{"domain_suffix": []string{"local", "lan"}, "server": "local"},
 	}
 	if withTUN {
-		inbounds = append(inbounds, map[string]any{
-			"type": "tun", "tag": "tun-in", "interface_name": "olcvpn-tun",
-			"address":    []string{"172.19.0.1/30"},
-			"auto_route": true, "strict_route": true, "stack": "mixed",
-		})
+		inbounds = append(inbounds, tunInbound())
 		rules = append(rules,
 			// Windows шлёт DNS на адрес туннеля, 172.19.0.2. Правило по
 			// protocol без сниффинга не срабатывает, поэтому перехват — по
 			// адресу; иначе запрос уйдёт по ip_is_private «напрямую» в никуда
 			// и у системы не откроется ни один сайт.
 			map[string]any{"ip_cidr": []string{"172.19.0.2/32"}, "port": 53, "action": "hijack-dns"},
-			// Выше общего перехвата DNS: клиент VK TURN резолвит адреса VK сам,
-			// через публичные DNS, и это должно идти напрямую, а не через
-			// туннель, который от него же и зависит.
-			map[string]any{"inbound": []string{"tun-in"}, "process_name": own, "outbound": "direct"},
-			map[string]any{"protocol": "dns", "action": "hijack-dns"},
 		)
-		dnsRules = append([]any{map[string]any{"process_name": own, "server": "local"}}, dnsRules...)
+		// Выше общего перехвата DNS: клиент VK TURN резолвит адреса VK сам,
+		// через публичные DNS, и это должно идти напрямую, а не через
+		// туннель, который от него же и зависит. В Android свои процессы в
+		// туннель не попадают вовсе — их исключает сам VpnService.
+		if own != nil {
+			rules = append(rules, withKey(withKey(own, "inbound", []string{"tun-in"}), "outbound", "direct"))
+			dnsRules = append([]any{withKey(own, "server", "local")}, dnsRules...)
+		}
+		rules = append(rules, map[string]any{"protocol": "dns", "action": "hijack-dns"})
 	}
 	// «Мимо туннеля» из настроек — как и для Телемоста.
 	if hosts := csv(cfg.DirectHosts); len(hosts) > 0 {
@@ -228,7 +226,7 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 			// UDP, а не TCP: WireGuard его несёт, а TCP-рукопожатие ради
 			// каждого запроса через ПК → VK → сервер стоит лишних секунд.
 			map[string]any{"tag": "remote", "address": dnsServer, "detour": "wg"},
-			map[string]any{"tag": "local", "address": "local"},
+			localDNS(),
 		},
 		"rules": dnsRules,
 		"final": "remote",
@@ -256,7 +254,7 @@ func vkturnSingBoxConfig(cfg *Config, s *Server, dir string, withTUN bool) ([]by
 		"inbounds":  inbounds,
 		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
 		"route": map[string]any{
-			"auto_detect_interface":   withTUN,
+			"auto_detect_interface":   autoDetectInterface(withTUN),
 			"rules":                   rules,
 			"final":                   "wg",
 			"default_domain_resolver": "local",
@@ -286,9 +284,9 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	if s.WG == nil {
 		return fmt.Errorf("у сервера VK TURN нет конфига WireGuard")
 	}
-	client := filepath.Join(t.dir, "bin", "vkturn-client.exe")
-	if _, err := os.Stat(client); err != nil {
-		return fmt.Errorf("не найден bin\\vkturn-client.exe")
+	client, err := vkturnClient(t.dir)
+	if err != nil {
+		return err
 	}
 	if withTUN && !isAdmin() {
 		return fmt.Errorf("для режима «Весь трафик» нужны права администратора — запустите olcvpn через start.cmd")
@@ -302,7 +300,7 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 		"-access-pipe",
 	)
 	cmd.Dir = t.dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	childAttr(cmd)
 	// Капчу показывает окно olcvpn, а не внешний браузер.
 	cmd.Env = append(os.Environ(), "VKTURN_NO_BROWSER=1")
 	if s.WrapKey != "" {
@@ -518,46 +516,20 @@ func (t *Tunnel) startVKTurnSingBox(cfg *Config, s *Server, withTUN bool) error 
 		return nil
 	}
 
-	sb := filepath.Join(t.dir, "bin", "sing-box.exe")
-	if _, err := os.Stat(sb); err != nil {
-		return fmt.Errorf("не найден bin\\sing-box.exe")
-	}
+	// В конфиге закрытый ключ WireGuard: runSingBox пишет его на диск только
+	// для текущего пользователя, а в Android не пишет вовсе.
 	conf, err := vkturnSingBoxConfig(cfg, s, t.dir, withTUN)
 	if err != nil {
 		return err
 	}
-	// В конфиге закрытый ключ WireGuard — только для текущего пользователя.
-	confPath := filepath.Join(t.dir, "sing-box-config.json")
-	if err := os.WriteFile(confPath, conf, 0o600); err != nil {
-		return err
-	}
-
-	cmd := exec.Command(sb, "run", "-c", confPath) //nolint:gosec // app-owned paths
-	cmd.Dir = t.dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Env = append(os.Environ(),
-		"ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true",
-		"ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true",
-	)
-	stderr, err := cmd.StderrPipe()
+	proc, err := t.runSingBox(conf, withTUN)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	bindToApp(cmd.Process)
 	t.mu.Lock()
-	t.singbox = cmd
+	t.singbox = proc
 	t.tunOn = withTUN
 	t.mu.Unlock()
-
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			t.log.add("sing-box: " + strings.TrimRight(sc.Text(), "\r"))
-		}
-	}()
 	return nil
 }
 

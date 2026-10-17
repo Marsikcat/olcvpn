@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Цвета — как у страницы (web/index.html), чтобы до её загрузки
+         и под системными полосами не мелькал чужой фон. -->
+    <style name="Theme.Olcvpn" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorAccent">#4c8dff</item>
+    </style>
+    <color name="bg">#f2f4f8</color>
+</resources>

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -38,7 +37,7 @@ func (k coreKind) String() string {
 // detectCoreKind asks the binary for its usage text and classifies it.
 func detectCoreKind(bin string) coreKind {
 	cmd := exec.Command(bin, "--help")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	childAttr(cmd)
 	out, _ := cmd.CombinedOutput()
 	text := string(out)
 	switch {
@@ -69,7 +68,7 @@ type Tunnel struct {
 
 	mu        sync.Mutex
 	core      *exec.Cmd
-	singbox   *exec.Cmd
+	singbox   singBoxProc
 	phase     phase
 	detail    string
 	server    *Server
@@ -197,7 +196,7 @@ func (t *Tunnel) Start(cfg *Config, srv *Server, bin string, kind coreKind, with
 	}
 
 	cmd.Dir = t.dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	childAttr(cmd)
 	// The core talks to the conference API directly; a stale system proxy
 	// (v2rayN / sing-box on 127.0.0.1:10809) would otherwise break the join.
 	cmd.Env = append(os.Environ(),
@@ -409,6 +408,10 @@ func (t *Tunnel) wait(cmd *exec.Cmd) {
 	}
 }
 
+// singBoxProc is a running sing-box: bin\sing-box.exe in Windows, the
+// library inside olcvpn itself in Android.
+type singBoxProc interface{ stop() }
+
 func (t *Tunnel) startSingBox(cfg *Config) error {
 	t.mu.Lock()
 	already := t.singbox != nil
@@ -417,50 +420,22 @@ func (t *Tunnel) startSingBox(cfg *Config) error {
 		return nil
 	}
 
-	sb := filepath.Join(t.dir, "bin", "sing-box.exe")
-	if _, err := os.Stat(sb); err != nil {
-		return fmt.Errorf("не найден bin\\sing-box.exe")
-	}
 	if !isAdmin() {
 		return fmt.Errorf("для TUN нужны права администратора — перезапустите от имени администратора")
 	}
-
-	confPath := filepath.Join(t.dir, "sing-box-config.json")
 	conf, err := singBoxConfig(cfg, t.dir)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(confPath, conf, 0o600); err != nil {
-		return err
-	}
-
-	cmd := exec.Command(sb, "run", "-c", confPath) //nolint:gosec // paths are app-owned
-	cmd.Dir = t.dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Env = append(os.Environ(),
-		"ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true",
-		"ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true",
-	)
-	stderr, err := cmd.StderrPipe()
+	proc, err := t.runSingBox(conf, true)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	bindToApp(cmd.Process)
 
 	t.mu.Lock()
-	t.singbox = cmd
+	t.singbox = proc
 	t.tunOn = true
 	t.mu.Unlock()
-
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			t.log.add("sing-box: " + strings.TrimRight(sc.Text(), "\r"))
-		}
-	}()
 
 	t.setPhase(phaseConnected, "TUN активен")
 	t.log.add("sing-box: системный TUN поднят")
@@ -469,15 +444,13 @@ func (t *Tunnel) startSingBox(cfg *Config) error {
 
 func (t *Tunnel) stopSingBox() {
 	t.mu.Lock()
-	cmd := t.singbox
+	proc := t.singbox
 	t.singbox = nil
 	t.tunOn = false
 	t.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
-		return
+	if proc != nil {
+		proc.stop()
 	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
 }
 
 // Stop tears both processes down.
@@ -514,32 +487,6 @@ func (t *Tunnel) serverID() string {
 		return ""
 	}
 	return t.server.ID
-}
-
-// ownProcesses lists the executables that must bypass the TUN: ours, plus
-// every olcrtc core build lying next to the app. A fixed list once missed
-// olcrtc-fork.exe — the very core the release ships — so after the TUN came
-// up the core's own reconnects went into its own SOCKS and the link looped.
-func ownProcesses(dir string) []string {
-	names := []string{"olcvpn.exe", "sing-box.exe", "vkturn-client.exe", "olcrtc.exe"}
-	seen := map[string]bool{}
-	for _, n := range names {
-		seen[strings.ToLower(n)] = true
-	}
-	for _, pat := range []string{
-		filepath.Join(dir, "bin", "olcrtc*.exe"),
-		filepath.Join(dir, "olcrtc*.exe"),
-	} {
-		found, _ := filepath.Glob(pat)
-		for _, p := range found {
-			n := filepath.Base(p)
-			if !seen[strings.ToLower(n)] {
-				seen[strings.ToLower(n)] = true
-				names = append(names, n)
-			}
-		}
-	}
-	return names
 }
 
 // leaveCaptcha takes the window back from a VK captcha page whose client is
@@ -626,7 +573,9 @@ func singBoxConfig(cfg *Config, dir string) ([]byte, error) {
 	rules := []any{
 		map[string]any{"ip_cidr": []string{"172.19.0.2/32"}, "port": 53, "action": "hijack-dns"},
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
-		map[string]any{"process_name": ownProcesses(dir), "outbound": "direct"},
+	}
+	if own := ownTraffic(dir); own != nil {
+		rules = append(rules, withKey(own, "outbound", "direct"))
 	}
 	if hosts := csv(cfg.DirectHosts); len(hosts) > 0 {
 		rules = append(rules, map[string]any{"domain_suffix": hosts, "outbound": "direct"})
@@ -652,30 +601,34 @@ func singBoxConfig(cfg *Config, dir string) ([]byte, error) {
 		"dns": map[string]any{
 			"servers": []any{
 				map[string]any{"tag": "remote", "address": "tcp://1.1.1.1", "detour": "proxy"},
-				map[string]any{"tag": "local", "address": "local"},
+				localDNS(),
 			},
 			"rules": dnsRules,
 			"final": "remote",
 		},
-		"inbounds": []any{
-			map[string]any{
-				"type": "tun", "tag": "tun-in", "interface_name": "olcvpn-tun",
-				"address":    []string{"172.19.0.1/30"},
-				"auto_route": true, "strict_route": true, "stack": "mixed",
-			},
-		},
+		"inbounds": []any{tunInbound()},
 		"outbounds": []any{
 			map[string]any{"type": "socks", "tag": "proxy", "server": cfg.SocksHost, "server_port": cfg.SocksPort, "version": "5"},
 			map[string]any{"type": "direct", "tag": "direct"},
 		},
 		"route": map[string]any{
-			"auto_detect_interface":   true,
+			"auto_detect_interface":   autoDetectInterface(true),
 			"rules":                   rules,
 			"final":                   "proxy",
 			"default_domain_resolver": "local",
 		},
 	}
 	return json.MarshalIndent(conf, "", "  ")
+}
+
+// withKey copies a sing-box rule and adds one more field to it.
+func withKey(m map[string]any, k string, v any) map[string]any {
+	out := make(map[string]any, len(m)+1)
+	for mk, mv := range m {
+		out[mk] = mv
+	}
+	out[k] = v
+	return out
 }
 
 func csv(s string) []string {

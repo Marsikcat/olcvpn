@@ -126,32 +126,3 @@ func (a *app) publicServers() []Server {
 	}
 	return out
 }
-
-// openShare shows the window straight on the share sheet — for the tray menu.
-func (a *app) openShare() {
-	target := a.url + "#share"
-	if a.inWindow.Load() {
-		select {
-		case a.nav <- target:
-		default:
-		}
-		return
-	}
-	openBrowser(target)
-}
-
-// onCaptcha routes the VK captcha page to wherever the user is looking: the
-// app window when there is one, the default browser otherwise. An empty url
-// means the captcha is passed and the window can go back to the app.
-func (a *app) onCaptcha(url string) {
-	if a.inWindow.Load() {
-		select {
-		case a.nav <- url:
-		default:
-		}
-		return
-	}
-	if url != "" {
-		openBrowser(url)
-	}
-}

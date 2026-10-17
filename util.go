@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -68,18 +69,6 @@ func (l *logBus) subscribe() (chan string, func()) {
 		l.mu.Unlock()
 	}
 }
-
-// isAdmin reports whether the process is elevated. Opening a raw physical
-// drive handle succeeds only for administrators, which is enough of a probe.
-// Elevation cannot change while the process runs, so it is asked once.
-var isAdmin = sync.OnceValue(func() bool {
-	f, err := os.Open(`\\.\PHYSICALDRIVE0`)
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
-	return true
-})
 
 // socksDial performs a SOCKS5 CONNECT to host:port through the local proxy.
 func socksDial(proxyAddr, host string, port uint16) (net.Conn, error) {
@@ -220,13 +209,24 @@ var apiReads = map[string]bool{
 //   - Changes must be POST with Content-Type application/json: a browser
 //     only sends that cross-origin after a CORS preflight, which we never
 //     answer, so forms, <img> and no-cors fetch cannot reach the handlers.
-func localOnly(addr string, next http.Handler) http.Handler {
+//   - With a token (Android), every request must carry it in a cookie. On a
+//     phone the threat is not a browser tab but any other installed app: it
+//     can open 127.0.0.1 directly and send whatever headers it likes. The
+//     token comes from the app shell, which hands it to its own WebView only.
+func localOnly(addr, token string, next http.Handler) http.Handler {
 	_, port, _ := net.SplitHostPort(addr)
 	hosts := map[string]bool{addr: true, "localhost:" + port: true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hosts[r.Host] {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
+		}
+		if token != "" {
+			c, err := r.Cookie(tokenCookie)
+			if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(token)) != 1 {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && !apiReads[r.URL.Path] {
 			ct := r.Header.Get("Content-Type")
@@ -238,3 +238,10 @@ func localOnly(addr string, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// tokenCookie carries the UI token the Android shell sets for its WebView.
+const tokenCookie = "olcvpn_token"
+
+// uiToken is the secret the API demands, if any: the Android shell passes it
+// in the environment. The desktop has no such shell and no token.
+func uiToken() string { return os.Getenv("OLCVPN_TOKEN") }

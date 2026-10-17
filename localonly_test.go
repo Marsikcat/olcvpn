@@ -9,7 +9,7 @@ import (
 
 func TestLocalOnly(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	h := localOnly("127.0.0.1:8899", ok)
+	h := localOnly("127.0.0.1:8899", "", ok)
 
 	cases := []struct {
 		name, method, host, path, ct string
@@ -28,6 +28,31 @@ func TestLocalOnly(t *testing.T) {
 		r.Host = c.host
 		if c.ct != "" {
 			r.Header.Set("Content-Type", c.ct)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Errorf("%s: код %d, want %d", c.name, w.Code, c.want)
+		}
+	}
+}
+
+// В Android к 127.0.0.1 может постучаться любое приложение на телефоне, так
+// что без токена из cookie не отвечает даже страница.
+func TestLocalOnlyToken(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := localOnly("127.0.0.1:8899", "s3cret", ok)
+	for _, c := range []struct {
+		name, cookie string
+		want         int
+	}{
+		{"без токена", "", 403},
+		{"чужой токен", "nope", 403},
+		{"свой токен", "s3cret", 200},
+	} {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:8899/api/state", nil)
+		if c.cookie != "" {
+			r.AddCookie(&http.Cookie{Name: tokenCookie, Value: c.cookie})
 		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)

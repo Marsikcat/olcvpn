@@ -11,14 +11,11 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -26,11 +23,14 @@ import (
 var webFS embed.FS
 
 type app struct {
-	dir  string
-	url  string // адрес интерфейса
-	log  *logBus
-	tun  *Tunnel
-	tray *tray
+	dir string
+	url string // адрес интерфейса
+	log *logBus
+	tun *Tunnel
+
+	// platformApp — то, что есть только на одной платформе: трей и окно
+	// WebView2 в Windows, канал к оболочке приложения в Android.
+	platformApp
 
 	// cfgMu охраняет cfg. HTTP-обработчики работают параллельно, а с ними —
 	// обновление подписки при запуске, автоподключение и трей; без замка
@@ -48,23 +48,9 @@ type app struct {
 
 	updMu sync.Mutex
 	upd   updateInfo
-
-	// Капча VK: куда переключить окно (пусто — обратно в приложение) и есть
-	// ли вообще окно, а не вкладка браузера.
-	nav      chan string
-	inWindow atomic.Bool
 }
 
-func main() {
-	exe, err := os.Executable()
-	if err != nil {
-		log.Fatal(err)
-	}
-	dir := filepath.Dir(exe)
-	if v := os.Getenv("OLCVPN_DIR"); v != "" {
-		dir = v
-	}
-
+func newApp(dir string) *app {
 	bus := newLogBus()
 	a := &app{
 		dir:  dir,
@@ -72,13 +58,18 @@ func main() {
 		log:  bus,
 		tun:  newTunnel(dir, bus),
 		kind: map[string]coreKind{},
-		nav:  make(chan string, 4),
 	}
+	a.initPlatform()
 	a.tun.onCaptcha = a.onCaptcha
+	return a
+}
 
+// serve starts the UI and its API on a local port. The address is also
+// written to olcvpn.url, for whoever wants to open it by hand.
+func (a *app) serve() (*http.Server, error) {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	mux := http.NewServeMux()
@@ -108,14 +99,14 @@ func main() {
 	if err != nil {
 		ln, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 	}
 	url := fmt.Sprintf("http://%s/", ln.Addr().String())
 	a.url = url
-	_ = os.WriteFile(filepath.Join(dir, "olcvpn.url"), []byte(url+"\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(a.dir, "olcvpn.url"), []byte(url+"\n"), 0o600)
 
-	a.log.addf("olcvpn запущен, каталог %s", dir)
+	a.log.addf("olcvpn запущен, каталог %s", a.dir)
 	if !isAdmin() {
 		a.log.add("права администратора отсутствуют — режим TUN будет недоступен")
 	}
@@ -123,7 +114,10 @@ func main() {
 		a.log.addf("найдено ядро: %s (%s)", c.Name, c.Kind)
 	}
 
-	srv := &http.Server{Handler: localOnly(ln.Addr().String(), mux), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           localOnly(ln.Addr().String(), uiToken(), mux),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Println(err)
@@ -131,8 +125,16 @@ func main() {
 	}()
 
 	fmt.Println("olcvpn:", url)
+	return srv, nil
+}
 
-	if a.cfg.Autoconnect {
+// startBackground runs what every launch does once the UI is up: autoconnect,
+// the update check, the subscription refresh and the autostart bookkeeping.
+func (a *app) startBackground() {
+	a.cfgMu.Lock()
+	autoconnect := a.cfg.Autoconnect
+	a.cfgMu.Unlock()
+	if autoconnect {
 		go func() {
 			if err := a.connectSelected(); err != nil {
 				a.log.addf("автоподключение: %v", err)
@@ -146,45 +148,14 @@ func main() {
 		a.autostart.Store(autostartEnabled())
 		a.repairAutostart()
 	}()
+}
 
-	t := newTray(a)
-	a.tray = t
-	t.start()
-	defer t.stop()
-
-	if browserMode() || !runWindow(url, a, t) {
-		// No WebView2 runtime (or --browser asked for it): fall back to the
-		// default browser and wait for a signal instead of a window close.
-		openBrowser(url)
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		select {
-		case <-ctx.Done():
-		case <-t.quit:
-		}
-	}
-
+// shutdown stops the tunnel and the UI server on the way out.
+func (a *app) shutdown(srv *http.Server) {
 	a.tun.Stop()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
-}
-
-// browserMode reports whether the user asked for the browser UI instead of the
-// app window.
-func browserMode() bool {
-	for _, arg := range os.Args[1:] {
-		if arg == "--browser" || arg == "-browser" {
-			return true
-		}
-	}
-	return false
-}
-
-func openBrowser(url string) {
-	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Start()
+	_ = srv.Shutdown(ctx)
 }
 
 // coreInfo describes one usable olcrtc binary found next to the app.
@@ -212,10 +183,7 @@ func coreRank(name string) int {
 
 func (a *app) cores() []coreInfo {
 	var candidates []string
-	for _, pat := range []string{
-		filepath.Join(a.dir, "bin", "olcrtc*.exe"),
-		filepath.Join(a.dir, "olcrtc*.exe"),
-	} {
+	for _, pat := range coreGlobs(a.dir) {
 		found, _ := filepath.Glob(pat)
 		candidates = append(candidates, found...)
 	}
@@ -241,7 +209,7 @@ func (a *app) cores() []coreInfo {
 		if k == coreUnknown {
 			continue
 		}
-		out = append(out, coreInfo{Name: filepath.Base(p), Path: p, Kind: k, KindName: k.String()})
+		out = append(out, coreInfo{Name: coreName(p), Path: p, Kind: k, KindName: k.String()})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		ri, rj := coreRank(out[i].Name), coreRank(out[j].Name)
@@ -263,7 +231,7 @@ func (a *app) pickCore() (coreInfo, error) {
 func (a *app) pickCoreNamed(want string) (coreInfo, error) {
 	cores := a.cores()
 	if len(cores) == 0 {
-		return coreInfo{}, fmt.Errorf("рядом с olcvpn.exe нет ни одного ядра olcrtc")
+		return coreInfo{}, fmt.Errorf("%s", noCoreMsg)
 	}
 	if want != "" {
 		for _, c := range cores {
@@ -318,6 +286,7 @@ func (a *app) handleState(w http.ResponseWriter, _ *http.Request) {
 	st["cores"] = a.cores()
 	st["core"] = core.Name
 	st["admin"] = isAdmin()
+	st["platform"] = platformName
 	st["version"] = version
 	st["autostart"] = a.autostart.Load()
 	st["updateLatest"] = upd.Latest
@@ -356,11 +325,7 @@ func (a *app) handleUpdateInstall(w http.ResponseWriter, _ *http.Request) {
 			a.log.addf("обновление: %v", err)
 			return
 		}
-		// Файлы подменит скрипт, как только этот процесс исчезнет.
-		time.Sleep(500 * time.Millisecond)
-		if a.tray != nil {
-			a.tray.signal(a.tray.quit)
-		}
+		a.afterUpdateInstall()
 	}()
 }
 
@@ -586,7 +551,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.TrayClose != nil {
 		a.cfg.TrayClose = *body.TrayClose
-		closeHides.Store(*body.TrayClose)
+		setCloseHides(*body.TrayClose)
 	}
 	if body.StartHidden != nil {
 		a.cfg.StartHidden = *body.StartHidden
@@ -770,17 +735,4 @@ func (a *app) handleLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
-}
-
-// trayMode reports whether the app was asked to start straight into the tray
-// for this launch only, without touching the saved setting. The autostart
-// entry can use it to come up quietly while a manual launch still shows the
-// window.
-func trayMode() bool {
-	for _, arg := range os.Args[1:] {
-		if arg == "--tray" || arg == "-tray" {
-			return true
-		}
-	}
-	return false
 }

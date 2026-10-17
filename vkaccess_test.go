@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,7 +168,7 @@ func TestVKAuthRefreshKeepsSession(t *testing.T) {
 	tun.onCaptcha = func(u string) { navs = append(navs, u) }
 	srv := &Server{ID: "x", Kind: kindVKTurn}
 	tun.peerSeen = true
-	tun.singbox = &exec.Cmd{} // sing-box как будто поднят
+	tun.singbox = fakeSingBox{} // sing-box как будто поднят
 	tun.setPhase(phaseProxy, "VK TURN")
 	feed := func(lines ...string) {
 		tun.pumpVKTurn(strings.NewReader(strings.Join(lines, "\n")), &Config{}, srv, false)
@@ -206,3 +205,8 @@ func TestVKAccessLife(t *testing.T) {
 		}
 	}
 }
+
+// fakeSingBox stands in for a running sing-box.
+type fakeSingBox struct{}
+
+func (fakeSingBox) stop() {}
