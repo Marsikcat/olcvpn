@@ -37,12 +37,14 @@ VK TURN, где он же поднимает WireGuard.
 только для серверов VK TURN. Собран из
 [PR #183](https://github.com/cacggghp/vk-turn-proxy/pull/183)
 ([NikKuz99/vk-turn-proxy](https://github.com/NikKuz99/vk-turn-proxy), ветка
-`fix/captcha-tls-auto-solver`, коммит `b8c4ffab11f2`) **с двумя правками** из
+`fix/captcha-tls-auto-solver`, коммит `b8c4ffab11f2`) **с тремя правками** из
 папки `patches/` этого репозитория: `vkturn-no-browser.patch` — при
 `VKTURN_NO_BROWSER=1` клиент не открывает внешний браузер для капчи, её
 показывает окно olcvpn; `vkturn-call-access.patch` — доступ к звонку,
 полученный после капчи, переиспользуется для новых учёток TURN и с флагом
-`-access-pipe` передаётся olcvpn, так что капча нужна раз за запуск.
+`-access-pipe` передаётся olcvpn, так что капча нужна раз за запуск;
+`vkturn-wrap-key-env.patch` — ключ маскировки для `-wrap` клиент берёт из
+`VKTURN_WRAP_KEY`, а не из командной строки, которую видят все процессы.
 
 PR нужен потому, что релиз v1.8.3 не понимает новый формат капчи VK
 (октябрь 2026) и не получает доступ к звонку.
@@ -51,6 +53,20 @@ PR нужен потому, что релиз v1.8.3 не понимает но�
 плюс патчи из этого репозитория; как собрать — в README, раздел «VK TURN».
 Текст лицензии лежит рядом: `bin/vkturn-client.LICENSE`. Если VK TURN не
 нужен, файл можно удалить — остальное работает без него.
+
+## APK для Android
+
+В `olcvpn-…-android-arm64.apk` те же компоненты, собранные под android/arm64
+(как — в README, раздел «Сборка APK»):
+
+* `libolcrtc.so` — то же ядро, что `bin/olcrtc-fork.exe`, плюс
+  `android/overlay/olcrtc_android.go`. Лицензия: WTFPL.
+* `libvkturn.so` — тот же клиент, что `bin/vkturn-client.exe`, с теми же
+  тремя правками, плюс `android/overlay/vkturn_android.go`. Лицензия: GPL-3.0.
+* `libolcvpn.so` — бэкенд olcvpn, в который sing-box 1.13.11 (с gVisor и
+  WireGuard) встроен библиотекой, а не отдельной программой. Поэтому эта
+  сборка целиком распространяется на условиях GPL-3.0; исходный код —
+  этот репозиторий, версии зависимостей — в `go.mod` и `go.sum`.
 
 ## Логотип
 
