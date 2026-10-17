@@ -21,6 +21,19 @@ val keystore = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// Тексты лицензий — в APK как assets/licenses/*: в нём sing-box и клиент
+// VK TURN под GPL-3.0, а она требует отдавать свой текст вместе с программой.
+// Приложение показывает те же файлы из бэкенда (licenses.go), а здесь они
+// лежат ещё и открыто, чтобы их было видно в самом APK.
+val licenseFiles = listOf("LICENSE", "THIRD-PARTY.md", "licenses/GPL-3.0.txt")
+    .map { rootProject.file("../$it") }
+    .onEach { check(it.isFile) { "нет $it" } }
+val licenseAssets = tasks.register<Sync>("licenseAssets") {
+    from(licenseFiles)
+    into(layout.buildDirectory.dir("generated/licenseAssets/licenses"))
+}
+tasks.named("preBuild") { dependsOn(licenseAssets) }
+
 android {
     namespace = "io.github.marsikcat.olcvpn"
     compileSdk = 36
@@ -59,6 +72,8 @@ android {
     packaging {
         jniLibs { useLegacyPackaging = true }
     }
+
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/licenseAssets"))
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

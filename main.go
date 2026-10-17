@@ -74,6 +74,7 @@ func (a *app) serve() (*http.Server, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	mux.HandleFunc("/licenses/", handleLicense)
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/import", a.handleImport)
 	mux.HandleFunc("/api/import-qr", a.handleImportQR)

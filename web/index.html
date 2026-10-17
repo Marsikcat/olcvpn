@@ -173,6 +173,14 @@
       background:#fff;image-rendering:pixelated}
   .sheet .warn{border:1px solid var(--line);border-radius:10px;margin-top:14px}
 
+  /* ── лицензии ─────────────────────────────────────── */
+  .lnk{background:none;border:none;padding:0;color:var(--accent);font:inherit;cursor:pointer}
+  .lnk:hover{text-decoration:underline}
+  pre.lic{margin:12px 0 0;padding:12px 14px;height:min(60vh,520px);overflow:auto;
+          background:var(--bg2);border:1px solid var(--line);border-radius:10px;
+          font:11.5px/1.55 ui-monospace,Consolas,monospace;color:var(--text);
+          white-space:pre-wrap;word-break:break-word}
+
   /* ── телефон ──────────────────────────────────────── */
   html{-webkit-tap-highlight-color:transparent}
   @media (hover:none){ .row:hover,.srv:hover{background:none} }
@@ -354,6 +362,7 @@
         <div class="msg" id="updMsg"></div>
         <div class="msg" id="advMsg"></div>
         <div class="note" id="adminNote"></div>
+        <div class="note"><button class="lnk" id="btnLic">Лицензии</button> olcvpn и сторонних компонентов</div>
       </div>
       <pre id="log" hidden></pre>
     </div>
@@ -387,6 +396,22 @@
       одновременно, будете выбивать друг друга. Для VK TURN другу лучше выдать свой
       конфиг WireGuard.
     </div>
+  </div>
+</div>
+
+<div class="modal" id="licModal" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="licTitle">
+    <div class="sheet-head">
+      <h3 id="licTitle">Лицензии</h3>
+      <button class="srvdel" id="licClose" title="Закрыть">✕</button>
+    </div>
+    <div class="seg seg3" id="licSeg" style="margin-top:14px">
+      <button data-lic="third-party">Компоненты</button>
+      <button data-lic="olcvpn">olcvpn</button>
+      <button data-lic="gpl-3.0">GPL-3.0</button>
+    </div>
+    <pre class="lic" id="licText"></pre>
+    <div class="note">Исходный код и как всё собрать — github.com/Marsikcat/olcvpn</div>
   </div>
 </div>
 
@@ -895,6 +920,45 @@ $('autostart').onchange = async () => {
 };
 
 $('btnLog').onclick = () => { const l = $('log'); l.hidden = !l.hidden; };
+
+/* ── лицензии ────────────────────────────────────────────── */
+/* Тексты отдаёт бэкенд (/licenses/…), на ПК и в Android одни и те же.
+   Свёрстаны они под 72 колонки, и в узком окне такие строки рвутся
+   посередине — поэтому строки абзаца склеиваются, а пункты списков и
+   заголовки остаются с новой строки. */
+const reflow = t => t.replace(/\r/g, '').split(/\n[ \t]*\n/).map(p =>
+  p.split('\n').map(l => l.trim()).filter(Boolean).reduce((out, l) =>
+    !out ? l : out + (/^([*#-]|\d+\.)\s/.test(l) ? '\n' : ' ') + l, '')
+).filter(Boolean).join('\n\n');
+const licTexts = {};
+let licCur = null;
+async function showLicense(name){
+  licCur = name;
+  for(const b of $('licSeg').children) b.classList.toggle('act', b.dataset.lic === name);
+  const pre = $('licText');
+  if(!licTexts[name]){
+    pre.textContent = 'Загружаю…';
+    try{
+      const r = await fetch('/licenses/' + name);
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      licTexts[name] = reflow(await r.text());
+    }catch(e){
+      if(licCur === name) pre.textContent = 'Не открылось: ' + e.message;
+      return;
+    }
+    if(licCur !== name) return;
+  }
+  pre.textContent = licTexts[name];
+  pre.scrollTop = 0;
+}
+const closeLic = () => { $('licModal').hidden = true; };
+$('btnLic').onclick = () => { $('licModal').hidden = false; showLicense(licCur || 'third-party'); };
+for(const b of $('licSeg').children) b.onclick = () => showLicense(b.dataset.lic);
+$('licClose').onclick = closeLic;
+$('licModal').onclick = e => { if(e.target === $('licModal')) closeLic(); };
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !$('licModal').hidden) closeLic();
+});
 
 /* ── обновления ──────────────────────────────────────────── */
 let upd = null;
