@@ -24,13 +24,23 @@ func TestMain(m *testing.M) {
 // fakeVKTurnClient ведёт себя как клиент с -access-pipe: читает доступ из
 // stdin и сообщает новый. Первый запуск — как после капчи.
 func fakeVKTurnClient() {
-	pipe := false
-	for _, a := range os.Args[1:] {
+	pipe, wrap, n := false, false, ""
+	envKey := os.Getenv("VKTURN_WRAP_KEY")
+	argKey := false
+	for i, a := range os.Args[1:] {
 		pipe = pipe || a == "-access-pipe"
+		wrap = wrap || a == "-wrap"
+		argKey = argKey || (envKey != "" && strings.Contains(a, envKey))
+		if a == "-n" && i+2 < len(os.Args) {
+			n = os.Args[i+2]
+		}
 	}
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	line = strings.TrimSpace(line)
 	switch {
+	case wrap:
+		// Отчёт о маскировке — тем же каналом, что и доступ к звонку.
+		fmt.Printf("%swrap n=%s envkey=%t argkey=%t\n", vkAccessPrefix, n, len(envKey) == 64, argKey)
 	case !pipe:
 		fmt.Println("клиента запустили без -access-pipe")
 		os.Exit(2)
@@ -54,9 +64,9 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// Доступ к звонку переживает перезапуск клиента VK TURN: то, что сообщил
-// один запуск, следующий получает через stdin — и в журнал это не попадает.
-func TestVKAccessSurvivesClientRestart(t *testing.T) {
+// fakeVKTurnSetup puts the test binary in place of bin\vkturn-client.exe.
+func fakeVKTurnSetup(t *testing.T) (*Tunnel, *logBus) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Skip(err)
@@ -67,9 +77,33 @@ func TestVKAccessSurvivesClientRestart(t *testing.T) {
 	}
 	copyFile(t, exe, filepath.Join(dir, "bin", "vkturn-client.exe"))
 	t.Setenv("OLCVPN_FAKE_VKTURN", "1")
-
 	bus := newLogBus()
-	tun := newTunnel(dir, bus)
+	return newTunnel(dir, bus), bus
+}
+
+// startFakeVKTurn starts the fake client for a server at peer, masked when
+// wrapKey is set.
+func startFakeVKTurn(t *testing.T, peer, wrapKey string) (*Tunnel, *Server) {
+	t.Helper()
+	tun, _ := fakeVKTurnSetup(t)
+	srv, err := newVKTurnServer("", "https://vk.com/call/join/abc", peer, testWG)
+	if err == nil {
+		err = srv.setWrapKey(wrapKey)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tun.StartVKTurn(&Config{SocksHost: "127.0.0.1", SocksPort: 18808}, &srv, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { waitFor(t, "выход клиента", func() bool { return !tun.running() }) })
+	return tun, &srv
+}
+
+// Доступ к звонку переживает перезапуск клиента VK TURN: то, что сообщил
+// один запуск, следующий получает через stdin — и в журнал это не попадает.
+func TestVKAccessSurvivesClientRestart(t *testing.T) {
+	tun, bus := fakeVKTurnSetup(t)
 	srv, err := newVKTurnServer("", "https://vk.com/call/join/abc", "203.0.113.10:56000", testWG)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +115,7 @@ func TestVKAccessSurvivesClientRestart(t *testing.T) {
 		if err := tun.StartVKTurn(cfg, &srv, false); err != nil {
 			t.Fatal(err)
 		}
-		waitFor(t, "доступ "+want, func() bool { return tun.savedVKAccess(srv.ID) == want })
+		waitFor(t, "доступ "+want, func() bool { return tun.savedVKAccess(srv.VKLink) == want })
 		waitFor(t, "выход клиента", func() bool { return !tun.running() })
 	}
 	run("first-access")
@@ -93,8 +127,16 @@ func TestVKAccessSurvivesClientRestart(t *testing.T) {
 		}
 	}
 
-	tun.keepVKAccess(srv.ID, "-")
-	if got := tun.savedVKAccess(srv.ID); got != "" {
+	// Сервер с тем же звонком, но другим адресом, получает тот же доступ.
+	other, _ := newVKTurnServer("", srv.VKLink, "203.0.113.10:56010", testWG)
+	if err := tun.StartVKTurn(cfg, &other, false); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "общий доступ", func() bool { return tun.savedVKAccess(srv.VKLink) == "first-access+again+again" })
+	waitFor(t, "выход клиента", func() bool { return !tun.running() })
+
+	tun.keepVKAccess(srv.VKLink, "-")
+	if got := tun.savedVKAccess(srv.VKLink); got != "" {
 		t.Errorf("после отказа VK доступ остался: %q", got)
 	}
 }

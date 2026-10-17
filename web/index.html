@@ -282,6 +282,9 @@
         <textarea id="vkWG" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.77.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …"></textarea>
         <input type="file" id="vkWGFile" accept=".conf,text/plain" hidden>
 
+        <label class="mt">Ключ маскировки (необязательно)</label>
+        <input type="text" id="vkWrap" placeholder="64 символа — если vk-turn-proxy запущен с -wrap" autocomplete="off" spellcheck="false">
+
         <label class="mt">Название (необязательно)</label>
         <input type="text" id="vkName" placeholder="VK TURN · мой сервер">
 
@@ -452,7 +455,7 @@ function render(){
   const sel = all.find(s => s.id === st.selectedId) || all[0];
   $('srvName').textContent = sel ? sel.name : 'Сервер не выбран';
   $('srvMeta').textContent = !sel ? 'импортируйте подписку или добавьте VK TURN'
-    : sel.kind === 'vkturn' ? 'VK TURN · ' + sel.peer
+    : sel.kind === 'vkturn' ? 'VK TURN · ' + sel.peer + (sel.wrap ? ' · маскировка' : '')
     : sel.carrier + ' · ' + sel.transport;
   $('srvFlag').textContent = sel && sel.kind === 'vkturn' ? 'VK' : 'VPN';
   $('srvFlag').classList.toggle('vk', !!sel && sel.kind === 'vkturn');
@@ -492,7 +495,7 @@ function render(){
     const s = all[i];
     el.querySelector('.nm').textContent = s.name;
     el.querySelector('.meta').textContent = s.kind === 'vkturn'
-      ? 'VK TURN · сервер ' + s.peer
+      ? 'VK TURN · сервер ' + s.peer + (s.wrap ? ' · маскировка' : '')
       : s.carrier + ' · ' + s.transport;
     el.onclick = async () => { await api('/api/select',{id:el.dataset.id}); refresh(); };
     const del = el.querySelector('.srvdel');
@@ -599,9 +602,11 @@ $('btnVKAdd').onclick = async () => {
       link: $('vkLink').value.trim(),
       peer: $('vkPeer').value.trim(),
       wg:   $('vkWG').value,
+      wrap: $('vkWrap').value.trim(),
     });
-    /* Ключ в поле больше не нужен: он сохранён в конфиге приложения. */
+    /* Ключи в полях больше не нужны: они сохранены в конфиге приложения. */
     $('vkWG').value = '';
+    $('vkWrap').value = '';
     m.className = 'msg good';
     m.textContent = 'Сервер добавлен и выбран. Нажмите кнопку подключения вверху.';
     refresh();

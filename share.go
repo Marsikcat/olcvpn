@@ -89,6 +89,9 @@ func vkturnURI(s Server) string {
 			q.Set("ka", strconv.Itoa(wg.Keepalive))
 		}
 	}
+	if s.WrapKey != "" {
+		q.Set("wrap", s.WrapKey)
+	}
 	return vkturnScheme + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
@@ -116,7 +119,14 @@ func parseVKTurnURI(raw string) (Server, error) {
 	if v := q.Get("ka"); v != "" {
 		fmt.Fprintf(&conf, "PersistentKeepalive = %s\n", v)
 	}
-	return newVKTurnServer(u.Fragment, q.Get("link"), q.Get("peer"), conf.String())
+	s, err := newVKTurnServer(u.Fragment, q.Get("link"), q.Get("peer"), conf.String())
+	if err != nil {
+		return Server{}, err
+	}
+	if err := s.setWrapKey(q.Get("wrap")); err != nil {
+		return Server{}, err
+	}
+	return s, nil
 }
 
 // splitVKTurnLinks takes the VK TURN links out of pasted text and returns

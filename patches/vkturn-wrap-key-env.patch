@@ -1,0 +1,24 @@
+diff --git a/client/main.go b/client/main.go
+--- a/client/main.go
++++ b/client/main.go
+@@ -2154,7 +2154,7 @@
+ 	manualCaptchaFlag := flag.Bool("manual-captcha", false, "skip auto captcha solving, use manual mode immediately")
+ 	captchaSolverFlag := flag.String("captcha-solver", "", "URL of Playwright-based captcha solver (e.g. http://127.0.0.1:8766). When set, captcha is solved via real headless Chromium, bypassing VK's bot detection. Requires captcha_solver.py running on the host.")
+ 	wrapMode := flag.Bool("wrap", false, "WRAP mode: SRTP-mimicry AEAD wrap DTLS packets. Peer server must use matching -wrap-key.")
+-	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex-encoded shared key for -wrap (64 hex chars)")
++	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex-encoded shared key for -wrap (64 hex chars); if empty, taken from VKTURN_WRAP_KEY")
+ 	genWrapKey := flag.Bool("gen-wrap-key", false, "print a fresh 64-character hex key for -wrap-key and exit")
+ 	accessPipe := flag.Bool("access-pipe", false, "for host apps: read a saved VK call access line from stdin at start and print every new one to stdout as \"VKTURN_ACCESS <data>\", so the captcha is passed once per host app run")
+ 	flag.Parse()
+@@ -2189,6 +2189,11 @@
+ 	if *wrapMode && *direct {
+ 		log.Panicf("-wrap requires DTLS; remove -no-dtls")
+ 	}
++	// A host app passes the key in the environment: the command line is
++	// visible to every process on the machine.
++	if *wrapMode && *wrapKeyHex == "" {
++		*wrapKeyHex = os.Getenv("VKTURN_WRAP_KEY")
++	}
+ 	wrapKey, err := decodeWrapKey(*wrapMode, *wrapKeyHex)
+ 	if err != nil {
+ 		log.Panicf("%v", err)

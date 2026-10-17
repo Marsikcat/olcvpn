@@ -29,6 +29,13 @@ type Server struct {
 	VKLink string     `json:"vkLink,omitempty"` // приглашение в звонок VK
 	Peer   string     `json:"peer,omitempty"`   // vk-turn-proxy на сервере, host:port
 	WG     *WireGuard `json:"wg,omitempty"`
+
+	// WrapKey — ключ маскировки под медиапоток звонка (vk-turn-proxy -wrap,
+	// 64 hex-символа); пусто — без маскировки. Wrap ставит только
+	// publicServers: интерфейсу нужно знать, что маскировка есть, а сам ключ
+	// ему не положен.
+	WrapKey string `json:"wrapKey,omitempty"`
+	Wrap    bool   `json:"wrap,omitempty"`
 }
 
 const kindVKTurn = "vkturn"

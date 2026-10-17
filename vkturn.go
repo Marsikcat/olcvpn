@@ -72,6 +72,25 @@ func newVKTurnServer(name, link, peer, wgText string) (Server, error) {
 	}, nil
 }
 
+// setWrapKey checks and stores the key of a vk-turn-proxy server started with
+// -wrap: 32 bytes as 64 hex characters. An empty key turns masking off.
+func (s *Server) setWrapKey(raw string) error {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	if key == "" {
+		s.WrapKey = ""
+		return nil
+	}
+	if b, err := hex.DecodeString(key); err != nil || len(b) != 32 {
+		return fmt.Errorf("ключ маскировки — 64 символа 0-9 и a-f, как его печатает vk-turn-proxy -gen-wrap-key")
+	}
+	s.WrapKey = key
+	return nil
+}
+
+// vkturnWrapStreams is how many TURN connections a masked server gets: with
+// masking VK no longer squeezes each one, and the speed adds up.
+const vkturnWrapStreams = 16
+
 // parseWireGuardConf reads a standard WireGuard client config. Endpoint is
 // ignored on purpose: the tunnel always goes to the local vk-turn client.
 func parseWireGuardConf(text string) (*WireGuard, error) {
@@ -286,6 +305,11 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	// Капчу показывает окно olcvpn, а не внешний браузер.
 	cmd.Env = append(os.Environ(), "VKTURN_NO_BROWSER=1")
+	if s.WrapKey != "" {
+		// Ключ — через окружение: командную строку видят все процессы.
+		cmd.Args = append(cmd.Args, "-wrap", "-n", strconv.Itoa(vkturnWrapStreams))
+		cmd.Env = append(cmd.Env, "VKTURN_WRAP_KEY="+s.WrapKey)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -307,7 +331,7 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	// Доступ к звонку, полученный после капчи в этом запуске olcvpn, — через
 	// stdin, а не аргументом: командную строку видят все процессы. Пустая
 	// строка — доступа ещё нет, клиент пойдёт к VK и, может быть, к капче.
-	access := t.savedVKAccess(s.ID)
+	access := t.savedVKAccess(s.VKLink)
 	go func() {
 		_, _ = io.WriteString(stdin, access+"\n")
 		_ = stdin.Close()
@@ -320,7 +344,11 @@ func (t *Tunnel) StartVKTurn(cfg *Config, s *Server, withTUN bool) error {
 	t.mu.Unlock()
 
 	t.setPhase(phaseStarting, "получаю доступ к звонку VK")
-	t.log.addf("VK TURN: %s → %s", s.Name, s.Peer)
+	if s.WrapKey != "" {
+		t.log.addf("VK TURN: %s → %s, с маскировкой под звонок, потоков: %d", s.Name, s.Peer, vkturnWrapStreams)
+	} else {
+		t.log.addf("VK TURN: %s → %s", s.Name, s.Peer)
+	}
 
 	go t.pumpVKTurn(stdout, cfg, s, withTUN)
 	go t.pumpVKTurn(stderr, cfg, s, withTUN)
@@ -337,7 +365,7 @@ func (t *Tunnel) pumpVKTurn(r io.Reader, cfg *Config, s *Server, withTUN bool) {
 		switch {
 		case strings.HasPrefix(line, vkAccessPrefix):
 			// Доступ к звонку — в память и ни в коем случае не в журнал.
-			t.keepVKAccess(s.ID, strings.TrimPrefix(line, vkAccessPrefix))
+			t.keepVKAccess(s.VKLink, strings.TrimPrefix(line, vkAccessPrefix))
 
 		case captchaURLRe.MatchString(line):
 			url := captchaURLRe.FindStringSubmatch(line)[1]
@@ -418,26 +446,26 @@ func (t *Tunnel) vkAuthorized() {
 	}
 }
 
-// keepVKAccess remembers the call access the client reported for a server,
-// or forgets it when the client says VK refused it.
-func (t *Tunnel) keepVKAccess(serverID, data string) {
+// keepVKAccess remembers the call access the client reported for a VK call
+// link, or forgets it when the client says VK refused it.
+func (t *Tunnel) keepVKAccess(link, data string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if data == "" || data == "-" {
-		delete(t.vkAccess, serverID)
+		delete(t.vkAccess, link)
 		return
 	}
 	if t.vkAccess == nil {
 		t.vkAccess = map[string]string{}
 	}
-	t.vkAccess[serverID] = data
+	t.vkAccess[link] = data
 }
 
-// savedVKAccess returns the call access kept for a server, "" if none.
-func (t *Tunnel) savedVKAccess(serverID string) string {
+// savedVKAccess returns the call access kept for a VK call link, "" if none.
+func (t *Tunnel) savedVKAccess(link string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.vkAccess[serverID]
+	return t.vkAccess[link]
 }
 
 // vkAccessLife renders how long VK said the call access lasts, if it did.

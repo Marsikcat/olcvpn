@@ -14,12 +14,16 @@ func (a *app) handleVKTurnAdd(w http.ResponseWriter, r *http.Request) {
 		Link string `json:"link"`
 		Peer string `json:"peer"`
 		WG   string `json:"wg"`
+		Wrap string `json:"wrap"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, err)
 		return
 	}
 	srv, err := newVKTurnServer(body.Name, body.Link, body.Peer, body.WG)
+	if err == nil {
+		err = srv.setWrapKey(body.Wrap)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -72,7 +76,6 @@ func (a *app) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 	if a.tun.serverID() == srv.ID {
 		a.tun.Stop()
 	}
-	a.tun.keepVKAccess(srv.ID, "") // доступ к звонку удалённого сервера не нужен
 
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
@@ -87,6 +90,14 @@ func (a *app) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.cfg.Servers = append(a.cfg.Servers[:idx:idx], a.cfg.Servers[idx+1:]...)
+	// Доступ к звонку больше не нужен, если звонок был только у этого сервера.
+	shared := false
+	for _, s := range a.cfg.Servers {
+		shared = shared || (s.isVKTurn() && s.VKLink == srv.VKLink)
+	}
+	if !shared {
+		a.tun.keepVKAccess(srv.VKLink, "")
+	}
 	if !a.cfg.hasServer(a.cfg.SelectedID) {
 		a.cfg.SelectedID = ""
 		if len(a.cfg.Servers) > 0 {
@@ -109,6 +120,8 @@ func (a *app) publicServers() []Server {
 	for _, s := range a.cfg.Servers {
 		s.Key = ""
 		s.WG = nil
+		s.Wrap = s.WrapKey != ""
+		s.WrapKey = ""
 		out = append(out, s)
 	}
 	return out
